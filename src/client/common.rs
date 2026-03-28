@@ -58,6 +58,29 @@ pub trait Client: Sync + Send {
         if let Some(user_agent) = self.global_config().read().user_agent.as_ref() {
             builder = builder.user_agent(user_agent);
         }
+        if let Some(true) = extra.and_then(|v| v.accept_invalid_certs) {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        if let Some(ca_cert) = extra.and_then(|v| v.ca_cert.as_deref()) {
+            let cert_data = std::fs::read(ca_cert)
+                .with_context(|| format!("Failed to read CA certificate from '{ca_cert}'"))?;
+            let cert = reqwest::Certificate::from_pem(&cert_data)
+                .with_context(|| format!("Invalid CA certificate in '{ca_cert}'"))?;
+            builder = builder.add_root_certificate(cert);
+        }
+        if let Some(client_cert) = extra.and_then(|v| v.client_cert.as_deref()) {
+            let mut identity_data = std::fs::read(client_cert)
+                .with_context(|| format!("Failed to read client certificate from '{client_cert}'"))?;
+            if let Some(client_key) = extra.and_then(|v| v.client_key.as_deref()) {
+                let key_data = std::fs::read(client_key)
+                    .with_context(|| format!("Failed to read client key from '{client_key}'"))?;
+                identity_data.push(b'\n');
+                identity_data.extend_from_slice(&key_data);
+            }
+            let identity = reqwest::Identity::from_pem(&identity_data)
+                .with_context(|| format!("Invalid client certificate/key from '{client_cert}'"))?;
+            builder = builder.identity(identity);
+        }
         let client = builder
             .connect_timeout(Duration::from_secs(timeout))
             .build()
@@ -201,6 +224,10 @@ impl Default for ClientConfig {
 pub struct ExtraConfig {
     pub proxy: Option<String>,
     pub connect_timeout: Option<u64>,
+    pub accept_invalid_certs: Option<bool>,
+    pub ca_cert: Option<String>,
+    pub client_cert: Option<String>,
+    pub client_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
