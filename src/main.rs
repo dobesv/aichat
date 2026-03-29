@@ -21,6 +21,7 @@ use crate::config::{
     ensure_parent_exists, list_agents, load_env_file, macro_execute, Config, GlobalConfig, Input,
     WorkingMode, CODE_ROLE, EXPLAIN_SHELL_ROLE, SHELL_ROLE, TEMP_SESSION_NAME,
 };
+use crate::hooks::{dispatch_hooks, HookEvent, HookResultControl};
 use crate::render::render_error;
 use crate::repl::Repl;
 use crate::utils::*;
@@ -30,7 +31,7 @@ use clap::Parser;
 use inquire::Text;
 use parking_lot::RwLock;
 use simplelog::{format_description, ConfigBuilder, LevelFilter, SimpleLogger, WriteLogger};
-use std::{env, process, sync::Arc};
+use std::{env, path::PathBuf, process, sync::Arc, time::Duration};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -182,15 +183,58 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
         false => {
             let mut input = create_input(&config, text, &cli.file, abort_signal.clone()).await?;
             input.use_embeddings(abort_signal.clone()).await?;
-            start_directive(&config, input, cli.code, abort_signal).await
+            dispatch_session_start(&config, "cmd").await;
+            let result = start_directive(&config, input, cli.code, abort_signal).await;
+            exit_session_with_hook(&config).await?;
+            result
         }
         true => {
             if !*IS_STDOUT_TERMINAL {
                 bail!("No TTY for REPL")
             }
-            start_interactive(&config).await
+            let result = start_interactive(&config).await;
+            exit_session_with_hook(&config).await?;
+            result
         }
     }
+}
+
+fn hook_dispatch_context(config: &GlobalConfig) -> (crate::hooks::HooksConfig, String, PathBuf) {
+    let config = config.read();
+    (
+        config.resolved_hooks(),
+        config
+            .session
+            .as_ref()
+            .map(|session| session.name())
+            .unwrap_or("default")
+            .to_string(),
+        env::current_dir().unwrap_or_default(),
+    )
+}
+
+async fn dispatch_session_start(config: &GlobalConfig, source: &str) {
+    let (hooks, session_id, cwd) = hook_dispatch_context(config);
+    let model_id = config.read().current_model().id().to_string();
+    let event = HookEvent::SessionStart {
+        source: source.to_string(),
+        model: model_id,
+    };
+    let _ = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+}
+
+async fn exit_session_with_hook(config: &GlobalConfig) -> Result<()> {
+    let (hooks, session_id, cwd) = hook_dispatch_context(config);
+    config.write().exit_session()?;
+    let event = HookEvent::SessionEnd {
+        reason: "session_exit".to_string(),
+    };
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        dispatch_hooks(&event, &hooks.entries, &session_id, &cwd),
+    )
+    .await;
+    Ok(())
 }
 
 #[async_recursion::async_recursion]
@@ -203,6 +247,15 @@ async fn start_directive(
     let client = input.create_client()?;
     let extract_code = !*IS_STDOUT_TERMINAL && code_mode;
     config.write().before_chat_completion(&input)?;
+    let (hooks, session_id, cwd) = hook_dispatch_context(config);
+    let input_text = input.text();
+    let event = HookEvent::UserPromptSubmit {
+        prompt: input_text.clone(),
+    };
+    let outcome = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+    if let HookResultControl::Block { reason } = outcome.control {
+        bail!("{reason}");
+    }
     let (output, tool_results) = if !input.stream() || extract_code {
         call_chat_completions(
             &input,
@@ -218,6 +271,26 @@ async fn start_directive(
     config
         .write()
         .after_chat_completion(&input, &output, &tool_results)?;
+    let stop_outcome = if tool_results.is_empty() {
+        let event = HookEvent::Stop {
+            stop_hook_active: true,
+            last_assistant_message: Some(output.clone()),
+        };
+        let stop_outcome = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+        if let Some(additional_context) = stop_outcome
+            .result
+            .additional_context
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            debug!(
+                "Captured Stop hook additional context for later auto-continue in CMD: {additional_context}"
+            );
+        }
+        Some(stop_outcome)
+    } else {
+        None
+    };
 
     if !tool_results.is_empty() {
         start_directive(
@@ -229,11 +302,12 @@ async fn start_directive(
         .await?;
     }
 
-    config.write().exit_session()?;
+    let _ = stop_outcome;
     Ok(())
 }
 
 async fn start_interactive(config: &GlobalConfig) -> Result<()> {
+    dispatch_session_start(config, "repl").await;
     let mut repl: Repl = Repl::init(config)?;
     repl.run().await
 }

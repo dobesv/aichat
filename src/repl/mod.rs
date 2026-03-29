@@ -11,12 +11,13 @@ use crate::config::{
     macro_execute, AgentVariables, AssertState, Config, GlobalConfig, Input, LastMessage,
     StateFlags,
 };
+use crate::hooks::{dispatch_hooks, HookEvent, HookResultControl};
 use crate::render::render_error;
 use crate::utils::{
     abortable_run_with_spinner, create_abort_signal, dimmed_text, set_text, temp_file, AbortSignal,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use crossterm::cursor::SetCursorStyle;
 use fancy_regex::Regex;
 use reedline::CursorConfig;
@@ -704,8 +705,38 @@ pub async fn run_repl_command(
             _ => unknown_command()?,
         },
         None => {
-            let input = Input::from_str(config, line, None);
-            ask(config, abort_signal.clone(), input, true).await?;
+            let (hooks, session_id) = {
+                let config = config.read();
+                (
+                    config.resolved_hooks(),
+                    config
+                        .session
+                        .as_ref()
+                        .map(|session| session.name())
+                        .unwrap_or("default")
+                        .to_string(),
+                )
+            };
+            let cwd = env::current_dir().unwrap_or_default();
+            let event = HookEvent::UserPromptSubmit {
+                prompt: line.to_string(),
+            };
+            let outcome = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+            match outcome.control {
+                HookResultControl::Block { reason } => {
+                    render_error(anyhow!(reason));
+                }
+                HookResultControl::Continue => {
+                    let input_text = match outcome.result.additional_context {
+                        Some(additional_context) if !additional_context.is_empty() => {
+                            format!("{line}\n\n{additional_context}")
+                        }
+                        _ => line.to_string(),
+                    };
+                    let input = Input::from_str(config, &input_text, None);
+                    ask(config, abort_signal.clone(), input, true).await?;
+                }
+            }
         }
     }
 
@@ -743,6 +774,39 @@ async fn ask(
     config
         .write()
         .after_chat_completion(&input, &output, &tool_results)?;
+    let stop_outcome = if tool_results.is_empty() {
+        let (hooks, session_id) = {
+            let config = config.read();
+            (
+                config.resolved_hooks(),
+                config
+                    .session
+                    .as_ref()
+                    .map(|session| session.name())
+                    .unwrap_or("default")
+                    .to_string(),
+            )
+        };
+        let cwd = env::current_dir().unwrap_or_default();
+        let event = HookEvent::Stop {
+            stop_hook_active: true,
+            last_assistant_message: Some(output.clone()),
+        };
+        let stop_outcome = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+        if let Some(additional_context) = stop_outcome
+            .result
+            .additional_context
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            debug!(
+                "Captured Stop hook additional context for later auto-continue in REPL: {additional_context}"
+            );
+        }
+        Some(stop_outcome)
+    } else {
+        None
+    };
     if !tool_results.is_empty() {
         ask(
             config,
@@ -752,6 +816,7 @@ async fn ask(
         )
         .await
     } else {
+        let _ = stop_outcome;
         Config::maybe_autoname_session(config.clone());
         Config::maybe_compress_session(config.clone());
         Ok(())
