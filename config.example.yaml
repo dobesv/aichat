@@ -115,7 +115,7 @@ clients:
   #     accept_invalid_certs: false                   # Accept self-signed or invalid TLS certificates
   #     ca_cert: /path/to/ca.pem                      # Path to a custom CA certificate (PEM format)
   #     client_cert: /path/to/client-cert.pem         # Path to client certificate for mTLS (PEM format)
-  #     client_key: /path/to/client-key.pem           # Path to client private key for mTLS (PEM format)
+  #     client_key: /path/to/client-key.pem           # Path to client private key for mTLS (PEM format); omit if client_cert contains both
 
   # See https://platform.openai.com/docs/quickstart
   - type: openai

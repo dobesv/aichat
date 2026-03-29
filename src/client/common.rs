@@ -78,8 +78,10 @@ pub trait Client: Sync + Send {
                 identity_data.extend_from_slice(&key_data);
             }
             let identity = reqwest::Identity::from_pem(&identity_data)
-                .with_context(|| format!("Invalid client certificate/key from '{client_cert}'"))?;
+                .with_context(|| format!("Invalid client certificate/key from '{client_cert}'. If the cert and key are in separate files, ensure 'client_key' is also set."))?;
             builder = builder.identity(identity);
+        } else if extra.and_then(|v| v.client_key.as_deref()).is_some() {
+            warn!("'client_key' is set but 'client_cert' is missing; mTLS identity will not be configured");
         }
         let client = builder
             .connect_timeout(Duration::from_secs(timeout))
