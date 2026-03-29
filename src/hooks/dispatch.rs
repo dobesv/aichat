@@ -1,6 +1,6 @@
 use crate::hooks::{
-    executor::execute_command_hook, CompiledMatcher, HookConfig, HookEvent, HookOutcome,
-    HookPayload, HookResult, HookResultControl,
+    executor::execute_command_hook, AsyncHookManager, CompiledMatcher, HookConfig, HookEvent,
+    HookOutcome, HookPayload, HookResult, HookResultControl,
 };
 
 use std::path::Path;
@@ -14,12 +14,33 @@ pub async fn dispatch_hooks(
     dispatch_hooks_with_count(event, hooks, session_id, cwd, 0).await
 }
 
+pub async fn dispatch_hooks_with_manager(
+    event: &HookEvent,
+    hooks: &[HookConfig],
+    session_id: &str,
+    cwd: &Path,
+    async_manager: Option<&AsyncHookManager>,
+) -> HookOutcome {
+    dispatch_hooks_with_count_and_manager(event, hooks, session_id, cwd, 0, async_manager).await
+}
+
 pub async fn dispatch_hooks_with_count(
     event: &HookEvent,
     hooks: &[HookConfig],
     session_id: &str,
     cwd: &Path,
     resume_count: u32,
+) -> HookOutcome {
+    dispatch_hooks_with_count_and_manager(event, hooks, session_id, cwd, resume_count, None).await
+}
+
+pub async fn dispatch_hooks_with_count_and_manager(
+    event: &HookEvent,
+    hooks: &[HookConfig],
+    session_id: &str,
+    cwd: &Path,
+    resume_count: u32,
+    async_manager: Option<&AsyncHookManager>,
 ) -> HookOutcome {
     let payload = HookPayload {
         session_id: session_id.to_string(),
@@ -48,6 +69,13 @@ pub async fn dispatch_hooks_with_count(
         };
 
         if !matcher.matches(event) {
+            continue;
+        }
+
+        if hook.async_hook == Some(true) {
+            if let Some(manager) = async_manager {
+                manager.spawn_hook(payload.clone(), hook.command.clone(), hook.timeout);
+            }
             continue;
         }
 
@@ -86,11 +114,12 @@ pub async fn dispatch_hooks_with_count(
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatch_hooks, dispatch_hooks_with_count};
-    use crate::hooks::{HookConfig, HookEvent, HookResultControl};
+    use super::{dispatch_hooks, dispatch_hooks_with_count, dispatch_hooks_with_count_and_manager};
+    use crate::hooks::{AsyncHookManager, HookConfig, HookEvent, HookResultControl};
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_test_dir(name: &str) -> PathBuf {
@@ -118,8 +147,19 @@ mod tests {
             command,
             timeout: Some(5),
             status_message: None,
+            async_hook: None,
             protocol: None,
         }
+    }
+
+    #[cfg(unix)]
+    fn sleep_command(seconds: u64) -> String {
+        format!("sleep {seconds}")
+    }
+
+    #[cfg(windows)]
+    fn sleep_command(seconds: u64) -> String {
+        format!("powershell -Command \"Start-Sleep -Seconds {seconds}\"")
     }
 
     #[cfg(unix)]
@@ -205,5 +245,32 @@ mod tests {
         assert!(matches!(outcome.control, HookResultControl::Continue));
         let payload = fs::read_to_string(&marker).expect("read payload marker");
         assert!(payload.contains("\"resume_count\":4"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_async_hook_does_not_block() {
+        let cwd = temp_test_dir("async-no-block");
+        let hooks = vec![HookConfig {
+            async_hook: Some(true),
+            command: sleep_command(5),
+            ..hook_config("PreToolUse", sleep_command(5))
+        }];
+        let manager = AsyncHookManager::new();
+        let start = tokio::time::Instant::now();
+
+        let outcome = dispatch_hooks_with_count_and_manager(
+            &pre_tool_use_event("shell"),
+            &hooks,
+            "session-async",
+            &cwd,
+            0,
+            Some(&manager),
+        )
+        .await;
+
+        assert!(matches!(outcome.control, HookResultControl::Continue));
+        assert!(start.elapsed() < Duration::from_secs(1));
+
+        tokio::time::sleep(Duration::from_millis(1200)).await;
     }
 }

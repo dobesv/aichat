@@ -11,7 +11,10 @@ use crate::config::{
     macro_execute, AgentVariables, AssertState, Config, GlobalConfig, Input, LastMessage,
     StateFlags,
 };
-use crate::hooks::{dispatch_hooks, dispatch_hooks_with_count, HookEvent, HookResultControl};
+use crate::hooks::{
+    dispatch_hooks_with_count_and_manager, dispatch_hooks_with_manager, AsyncHookManager,
+    HookEvent, HookResultControl,
+};
 use crate::render::render_error;
 use crate::utils::{
     abortable_run_with_spinner, create_abort_signal, dimmed_text, set_text, temp_file, AbortSignal,
@@ -196,10 +199,12 @@ pub struct Repl {
     editor: Reedline,
     prompt: ReplPrompt,
     abort_signal: AbortSignal,
+    async_manager: AsyncHookManager,
+    pending_async_context: Option<String>,
 }
 
 impl Repl {
-    pub fn init(config: &GlobalConfig) -> Result<Self> {
+    pub fn init(config: &GlobalConfig, async_manager: AsyncHookManager) -> Result<Self> {
         let editor = Self::create_editor(config)?;
 
         let prompt = ReplPrompt::new(config);
@@ -210,7 +215,13 @@ impl Repl {
             editor,
             prompt,
             abort_signal,
+            async_manager,
+            pending_async_context: None,
         })
+    }
+
+    pub fn async_manager(&self) -> &AsyncHookManager {
+        &self.async_manager
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -230,11 +241,22 @@ Type ".help" for additional help.
             if self.abort_signal.aborted_ctrld() {
                 break;
             }
+            if self.process_pending_async_resume().await? {
+                continue;
+            }
             let sig = self.editor.read_line(&self.prompt);
             match sig {
                 Ok(Signal::Success(line)) => {
                     self.abort_signal.reset();
-                    match run_repl_command(&self.config, self.abort_signal.clone(), &line).await {
+                    match run_repl_command(
+                        &self.config,
+                        self.abort_signal.clone(),
+                        &line,
+                        &mut self.async_manager,
+                        &mut self.pending_async_context,
+                    )
+                    .await
+                    {
                         Ok(exit) => {
                             if exit {
                                 break;
@@ -259,6 +281,42 @@ Type ".help" for additional help.
         }
         self.config.write().exit_session()?;
         Ok(())
+    }
+
+    async fn process_pending_async_resume(&mut self) -> Result<bool> {
+        let (should_resume, max_resume) = {
+            let config = self.config.read();
+            let hooks = config.resolved_hooks();
+            (drain_async_results(
+                &mut self.async_manager,
+                &mut self.pending_async_context,
+            ), hooks.max_resume.unwrap_or(5))
+        };
+        if !should_resume {
+            return Ok(false);
+        }
+
+        if self.abort_signal.aborted() {
+            return Ok(true);
+        }
+
+        let context = self
+            .pending_async_context
+            .take()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "Continue working on pending tasks.".to_string());
+        let input = Input::from_str(&self.config, &context, None);
+        ask(
+            &self.config,
+            self.abort_signal.clone(),
+            input,
+            true,
+            &mut self.async_manager,
+            &mut self.pending_async_context,
+            max_resume,
+        )
+        .await?;
+        Ok(true)
     }
 
     fn create_editor(config: &GlobalConfig) -> Result<Reedline> {
@@ -337,6 +395,48 @@ Type ".help" for additional help.
     }
 }
 
+fn append_pending_context(pending_async_context: &mut Option<String>, context: String) {
+    if context.is_empty() {
+        return;
+    }
+
+    match pending_async_context {
+        Some(existing) if !existing.is_empty() => {
+            existing.push_str("\n\n");
+            existing.push_str(&context);
+        }
+        _ => *pending_async_context = Some(context),
+    }
+}
+
+fn drain_async_results(
+    async_manager: &mut AsyncHookManager,
+    pending_async_context: &mut Option<String>,
+) -> bool {
+    let mut resume = false;
+    if let Some(pending) = async_manager.drain_pending() {
+        if let Some(context) = pending.additional_context.filter(|value| !value.is_empty()) {
+            append_pending_context(pending_async_context, context);
+        }
+        resume = pending.resume.unwrap_or(false);
+    }
+    resume
+}
+
+fn inject_pending_async_context(input: &mut Input, pending_async_context: &mut Option<String>) {
+    let Some(context) = pending_async_context.take().filter(|value| !value.is_empty()) else {
+        return;
+    };
+
+    let input_text = input.text();
+    input.clear_patch();
+    input.set_text(if input_text.is_empty() {
+        context
+    } else {
+        format!("{context}\n\n{input_text}")
+    });
+}
+
 #[derive(Debug, Clone)]
 pub struct ReplCommand {
     name: &'static str,
@@ -376,7 +476,10 @@ pub async fn run_repl_command(
     config: &GlobalConfig,
     abort_signal: AbortSignal,
     mut line: &str,
+    async_manager: &mut AsyncHookManager,
+    pending_async_context: &mut Option<String>,
 ) -> Result<bool> {
+    let max_resume = config.read().resolved_hooks().max_resume.unwrap_or(5);
     if let Ok(Some(captures)) = MULTILINE_RE.captures(line) {
         if let Some(text_match) = captures.get(1) {
             line = text_match.as_str();
@@ -427,7 +530,16 @@ pub async fn run_repl_command(
                     Some((name, text)) => {
                         let role = config.read().retrieve_role(name.trim())?;
                         let input = Input::from_str(config, text, Some(role));
-                        ask(config, abort_signal.clone(), input, false).await?;
+                        ask(
+                            config,
+                            abort_signal.clone(),
+                            input,
+                            false,
+                            async_manager,
+                            pending_async_context,
+                            max_resume,
+                        )
+                        .await?;
                     }
                     None => {
                         let name = args;
@@ -493,7 +605,16 @@ pub async fn run_repl_command(
                         Some(text) => {
                             println!("{}", dimmed_text(&format!(">> {text}")));
                             let input = Input::from_str(config, &text, None);
-                            ask(config, abort_signal.clone(), input, true).await?;
+                            ask(
+                                config,
+                                abort_signal.clone(),
+                                input,
+                                true,
+                                async_manager,
+                                pending_async_context,
+                                max_resume,
+                            )
+                            .await?;
                         }
                         None => {
                             bail!("Invalid starter value");
@@ -601,7 +722,16 @@ pub async fn run_repl_command(
                         abort_signal.clone(),
                     )
                     .await?;
-                    ask(config, abort_signal.clone(), input, true).await?;
+                    ask(
+                        config,
+                        abort_signal.clone(),
+                        input,
+                        true,
+                        async_manager,
+                        pending_async_context,
+                        max_resume,
+                    )
+                    .await?;
                 }
                 None => println!(
                     r#"Usage: .file <file|dir|url|cmd|loader:resource|%%>... [-- <text>...]
@@ -629,7 +759,16 @@ pub async fn run_repl_command(
                     None => bail!("Unable to continue the response"),
                 };
                 input.set_continue_output(&output);
-                ask(config, abort_signal.clone(), input, true).await?;
+                ask(
+                    config,
+                    abort_signal.clone(),
+                    input,
+                    true,
+                    async_manager,
+                    pending_async_context,
+                    max_resume,
+                )
+                .await?;
             }
             ".regenerate" => {
                 let LastMessage { mut input, .. } = match config
@@ -643,7 +782,16 @@ pub async fn run_repl_command(
                     None => bail!("Unable to regenerate the response"),
                 };
                 input.set_regenerate();
-                ask(config, abort_signal.clone(), input, true).await?;
+                ask(
+                    config,
+                    abort_signal.clone(),
+                    input,
+                    true,
+                    async_manager,
+                    pending_async_context,
+                    max_resume,
+                )
+                .await?;
             }
             ".set" => match args {
                 Some(args) => {
@@ -721,7 +869,9 @@ pub async fn run_repl_command(
             let event = HookEvent::UserPromptSubmit {
                 prompt: line.to_string(),
             };
-            let outcome = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+            let outcome =
+                dispatch_hooks_with_manager(&event, &hooks.entries, &session_id, &cwd, Some(async_manager))
+                    .await;
             match outcome.control {
                 HookResultControl::Block { reason } => {
                     render_error(anyhow!(reason));
@@ -734,7 +884,16 @@ pub async fn run_repl_command(
                         _ => line.to_string(),
                     };
                     let input = Input::from_str(config, &input_text, None);
-                    ask(config, abort_signal.clone(), input, true).await?;
+                    ask(
+                        config,
+                        abort_signal.clone(),
+                        input,
+                        true,
+                        async_manager,
+                        pending_async_context,
+                        hooks.max_resume.unwrap_or(5),
+                    )
+                    .await?;
                 }
             }
         }
@@ -753,8 +912,21 @@ async fn ask(
     abort_signal: AbortSignal,
     input: Input,
     with_embeddings: bool,
+    async_manager: &mut AsyncHookManager,
+    pending_async_context: &mut Option<String>,
+    max_resume: u32,
 ) -> Result<()> {
-    ask_inner(config, abort_signal, input, with_embeddings, 0).await
+    ask_inner(
+        config,
+        abort_signal,
+        input,
+        with_embeddings,
+        async_manager,
+        pending_async_context,
+        0,
+        max_resume,
+    )
+    .await
 }
 
 #[async_recursion::async_recursion]
@@ -763,7 +935,10 @@ async fn ask_inner(
     abort_signal: AbortSignal,
     mut input: Input,
     with_embeddings: bool,
+    async_manager: &mut AsyncHookManager,
+    pending_async_context: &mut Option<String>,
     resume_count: u32,
+    max_resume: u32,
 ) -> Result<()> {
     if input.is_empty() {
         return Ok(());
@@ -774,6 +949,9 @@ async fn ask_inner(
     while config.read().is_compressing_session() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+
+    drain_async_results(async_manager, pending_async_context);
+    inject_pending_async_context(&mut input, pending_async_context);
 
     let client = input.create_client()?;
     config.write().before_chat_completion(&input)?;
@@ -799,7 +977,14 @@ async fn ask_inner(
                     error: err.to_string(),
                     error_type: "api_error".to_string(),
                 };
-                let _ = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+                let _ = dispatch_hooks_with_manager(
+                    &event,
+                    &hooks.entries,
+                    &session_id,
+                    &cwd,
+                    Some(async_manager),
+                )
+                .await;
                 return Err(err);
             }
         }
@@ -812,7 +997,14 @@ async fn ask_inner(
                     error: err.to_string(),
                     error_type: "api_error".to_string(),
                 };
-                let _ = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+                let _ = dispatch_hooks_with_manager(
+                    &event,
+                    &hooks.entries,
+                    &session_id,
+                    &cwd,
+                    Some(async_manager),
+                )
+                .await;
                 return Err(err);
             }
         }
@@ -825,12 +1017,13 @@ async fn ask_inner(
             stop_hook_active: true,
             last_assistant_message: Some(output.clone()),
         };
-        let stop_outcome = dispatch_hooks_with_count(
+        let stop_outcome = dispatch_hooks_with_count_and_manager(
             &event,
             &hooks.entries,
             &session_id,
             &cwd,
             resume_count,
+            Some(async_manager),
         )
         .await;
         if let Some(additional_context) = stop_outcome
@@ -853,23 +1046,14 @@ async fn ask_inner(
             abort_signal,
             input.merge_tool_results(output, tool_results),
             false,
+            async_manager,
+            pending_async_context,
             resume_count,
+            max_resume,
         )
         .await
     } else {
         if let Some(stop_outcome) = stop_outcome {
-            let (hooks, _, _) = {
-                let config = config.read();
-                let hooks = config.resolved_hooks();
-                let session_id = config
-                    .session
-                    .as_ref()
-                    .map(|session| session.name())
-                    .unwrap_or("default")
-                    .to_string();
-                (hooks, session_id, env::current_dir().unwrap_or_default())
-            };
-            let max_resume = hooks.max_resume.unwrap_or(5);
             if stop_outcome.result.resume.unwrap_or(false)
                 && resume_count < max_resume
             {
@@ -888,11 +1072,38 @@ async fn ask_inner(
                     abort_signal,
                     new_input,
                     true,
+                    async_manager,
+                    pending_async_context,
                     resume_count + 1,
+                    max_resume,
                 )
                 .await;
             }
         }
+
+        if drain_async_results(async_manager, pending_async_context) && resume_count < max_resume {
+            if abort_signal.aborted() {
+                return Ok(());
+            }
+
+            let context = pending_async_context
+                .take()
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "Continue working on pending tasks.".to_string());
+            let new_input = Input::from_str(config, &context, None);
+            return ask_inner(
+                config,
+                abort_signal,
+                new_input,
+                true,
+                async_manager,
+                pending_async_context,
+                resume_count + 1,
+                max_resume,
+            )
+            .await;
+        }
+
         Config::maybe_autoname_session(config.clone());
         Config::maybe_compress_session(config.clone());
         Ok(())

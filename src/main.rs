@@ -21,7 +21,10 @@ use crate::config::{
     ensure_parent_exists, list_agents, load_env_file, macro_execute, Config, GlobalConfig, Input,
     WorkingMode, CODE_ROLE, EXPLAIN_SHELL_ROLE, SHELL_ROLE, TEMP_SESSION_NAME,
 };
-use crate::hooks::{dispatch_hooks, dispatch_hooks_with_count, HookEvent, HookResultControl};
+use crate::hooks::{
+    dispatch_hooks_with_count_and_manager, dispatch_hooks_with_manager, AsyncHookManager,
+    HookEvent, HookResultControl,
+};
 use crate::render::render_error;
 use crate::repl::Repl;
 use crate::utils::*;
@@ -182,20 +185,70 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
     match is_repl {
         false => {
             let input = create_input(&config, text, &cli.file, abort_signal.clone()).await?;
-            dispatch_session_start(&config, "cmd").await;
-            let result = start_directive(&config, input, cli.code, abort_signal).await;
-            exit_session_with_hook(&config).await?;
+            let mut async_manager = AsyncHookManager::new();
+            let mut pending_async_context = None;
+            dispatch_session_start(&config, "cmd", &async_manager).await;
+            let result = start_directive(
+                &config,
+                input,
+                cli.code,
+                abort_signal,
+                &mut async_manager,
+                &mut pending_async_context,
+            )
+            .await;
+            exit_session_with_hook(&config, &async_manager).await?;
             result
         }
         true => {
             if !*IS_STDOUT_TERMINAL {
                 bail!("No TTY for REPL")
             }
-            let result = start_interactive(&config).await;
-            exit_session_with_hook(&config).await?;
-            result
+            start_interactive(&config).await
         }
     }
+}
+
+fn append_pending_context(pending_async_context: &mut Option<String>, context: String) {
+    if context.is_empty() {
+        return;
+    }
+
+    match pending_async_context {
+        Some(existing) if !existing.is_empty() => {
+            existing.push_str("\n\n");
+            existing.push_str(&context);
+        }
+        _ => *pending_async_context = Some(context),
+    }
+}
+
+fn drain_async_results(
+    async_manager: &mut AsyncHookManager,
+    pending_async_context: &mut Option<String>,
+) -> bool {
+    let mut resume = false;
+    if let Some(pending) = async_manager.drain_pending() {
+        if let Some(context) = pending.additional_context.filter(|value| !value.is_empty()) {
+            append_pending_context(pending_async_context, context);
+        }
+        resume = pending.resume.unwrap_or(false);
+    }
+    resume
+}
+
+fn inject_pending_async_context(input: &mut Input, pending_async_context: &mut Option<String>) {
+    let Some(context) = pending_async_context.take().filter(|value| !value.is_empty()) else {
+        return;
+    };
+
+    let input_text = input.text();
+    input.clear_patch();
+    input.set_text(if input_text.is_empty() {
+        context
+    } else {
+        format!("{context}\n\n{input_text}")
+    });
 }
 
 fn hook_dispatch_context(config: &GlobalConfig) -> (crate::hooks::HooksConfig, String, PathBuf) {
@@ -212,17 +265,23 @@ fn hook_dispatch_context(config: &GlobalConfig) -> (crate::hooks::HooksConfig, S
     )
 }
 
-async fn dispatch_session_start(config: &GlobalConfig, source: &str) {
+async fn dispatch_session_start(
+    config: &GlobalConfig,
+    source: &str,
+    async_manager: &AsyncHookManager,
+) {
     let (hooks, session_id, cwd) = hook_dispatch_context(config);
     let model_id = config.read().current_model().id().to_string();
     let event = HookEvent::SessionStart {
         source: source.to_string(),
         model: model_id,
     };
-    let _ = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+    let _ =
+        dispatch_hooks_with_manager(&event, &hooks.entries, &session_id, &cwd, Some(async_manager))
+            .await;
 }
 
-async fn exit_session_with_hook(config: &GlobalConfig) -> Result<()> {
+async fn exit_session_with_hook(config: &GlobalConfig, async_manager: &AsyncHookManager) -> Result<()> {
     let (hooks, session_id, cwd) = hook_dispatch_context(config);
     config.write().exit_session()?;
     let event = HookEvent::SessionEnd {
@@ -230,7 +289,7 @@ async fn exit_session_with_hook(config: &GlobalConfig) -> Result<()> {
     };
     let _ = tokio::time::timeout(
         Duration::from_secs(5),
-        dispatch_hooks(&event, &hooks.entries, &session_id, &cwd),
+        dispatch_hooks_with_manager(&event, &hooks.entries, &session_id, &cwd, Some(async_manager)),
     )
     .await;
     Ok(())
@@ -242,8 +301,20 @@ async fn start_directive(
     input: Input,
     code_mode: bool,
     abort_signal: AbortSignal,
+    async_manager: &mut AsyncHookManager,
+    pending_async_context: &mut Option<String>,
 ) -> Result<()> {
-    start_directive_inner(config, input, code_mode, abort_signal, 0, true).await
+    start_directive_inner(
+        config,
+        input,
+        code_mode,
+        abort_signal,
+        async_manager,
+        pending_async_context,
+        0,
+        true,
+    )
+    .await
 }
 
 #[async_recursion::async_recursion]
@@ -252,12 +323,16 @@ async fn start_directive_inner(
     mut input: Input,
     code_mode: bool,
     abort_signal: AbortSignal,
+    async_manager: &mut AsyncHookManager,
+    pending_async_context: &mut Option<String>,
     resume_count: u32,
     with_embeddings: bool,
 ) -> Result<()> {
     if with_embeddings {
         input.use_embeddings(abort_signal.clone()).await?;
     }
+    drain_async_results(async_manager, pending_async_context);
+    inject_pending_async_context(&mut input, pending_async_context);
     let client = input.create_client()?;
     let extract_code = !*IS_STDOUT_TERMINAL && code_mode;
     config.write().before_chat_completion(&input)?;
@@ -266,12 +341,13 @@ async fn start_directive_inner(
     let event = HookEvent::UserPromptSubmit {
         prompt: input_text.clone(),
     };
-    let outcome = dispatch_hooks_with_count(
+    let outcome = dispatch_hooks_with_count_and_manager(
         &event,
         &hooks.entries,
         &session_id,
         &cwd,
         resume_count,
+        Some(async_manager),
     )
     .await;
     if let HookResultControl::Block { reason } = outcome.control {
@@ -293,7 +369,14 @@ async fn start_directive_inner(
                     error: err.to_string(),
                     error_type: "api_error".to_string(),
                 };
-                let _ = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+                let _ = dispatch_hooks_with_manager(
+                    &event,
+                    &hooks.entries,
+                    &session_id,
+                    &cwd,
+                    Some(async_manager),
+                )
+                .await;
                 return Err(err);
             }
         }
@@ -306,7 +389,14 @@ async fn start_directive_inner(
                     error: err.to_string(),
                     error_type: "api_error".to_string(),
                 };
-                let _ = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+                let _ = dispatch_hooks_with_manager(
+                    &event,
+                    &hooks.entries,
+                    &session_id,
+                    &cwd,
+                    Some(async_manager),
+                )
+                .await;
                 return Err(err);
             }
         }
@@ -319,12 +409,13 @@ async fn start_directive_inner(
             stop_hook_active: true,
             last_assistant_message: Some(output.clone()),
         };
-        let stop_outcome = dispatch_hooks_with_count(
+        let stop_outcome = dispatch_hooks_with_count_and_manager(
             &event,
             &hooks.entries,
             &session_id,
             &cwd,
             resume_count,
+            Some(async_manager),
         )
         .await;
         if let Some(additional_context) = stop_outcome
@@ -348,6 +439,8 @@ async fn start_directive_inner(
             input.merge_tool_results(output, tool_results),
             code_mode,
             abort_signal,
+            async_manager,
+            pending_async_context,
             resume_count,
             false,
         )
@@ -374,6 +467,8 @@ async fn start_directive_inner(
                 new_input,
                 code_mode,
                 abort_signal,
+                async_manager,
+                pending_async_context,
                 resume_count + 1,
                 true,
             )
@@ -381,13 +476,40 @@ async fn start_directive_inner(
         }
     }
 
+    let max_resume = hooks.max_resume.unwrap_or(5);
+    if drain_async_results(async_manager, pending_async_context) && resume_count < max_resume {
+        if abort_signal.aborted() {
+            return Ok(());
+        }
+
+        let context = pending_async_context
+            .take()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "Continue working on pending tasks.".to_string());
+        let new_input = Input::from_str(config, &context, None);
+        return start_directive_inner(
+            config,
+            new_input,
+            code_mode,
+            abort_signal,
+            async_manager,
+            pending_async_context,
+            resume_count + 1,
+            true,
+        )
+        .await;
+    }
+
     Ok(())
 }
 
 async fn start_interactive(config: &GlobalConfig) -> Result<()> {
-    dispatch_session_start(config, "repl").await;
-    let mut repl: Repl = Repl::init(config)?;
-    repl.run().await
+    let async_manager = AsyncHookManager::new();
+    dispatch_session_start(config, "repl", &async_manager).await;
+    let mut repl: Repl = Repl::init(config, async_manager)?;
+    let result = repl.run().await;
+    exit_session_with_hook(config, repl.async_manager()).await?;
+    result
 }
 
 #[async_recursion::async_recursion]
