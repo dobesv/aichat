@@ -15,4 +15,5 @@ variables:                       # Custom default values for the agent variables
 #   max_resume: 3                 # Agent-specific limit
 #   entries:
 #   - event: Stop                 # Fire after LLM responds
+#     type: claude-command         # Hook type (required)
 #     command: "/path/to/agent-hook.sh"
