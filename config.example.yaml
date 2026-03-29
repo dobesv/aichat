@@ -322,7 +322,7 @@ clients:
 
 # ---- hooks ----
 # hooks:                              # Hook configuration (Claude Code compatible)
-#   max_auto_continue: 5              # Max auto-continue turns (default: 5)
+#   max_resume: 5                     # Max resume turns (default: 5)
 #   entries:
 #   - event: Stop                     # Fire after LLM responds
 #     command: "/path/to/hook.sh"     # Shell command to execute

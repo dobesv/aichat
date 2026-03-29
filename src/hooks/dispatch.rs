@@ -19,17 +19,17 @@ pub async fn dispatch_hooks_with_count(
     hooks: &[HookConfig],
     session_id: &str,
     cwd: &Path,
-    auto_continue_count: u32,
+    resume_count: u32,
 ) -> HookOutcome {
     let payload = HookPayload {
         session_id: session_id.to_string(),
         cwd: cwd.to_path_buf(),
-        auto_continue_count,
+        resume_count,
         hook_event: event.clone(),
     };
 
     let mut additional_contexts = vec![];
-    let mut auto_continue = false;
+    let mut resume = false;
 
     for hook in hooks {
         if hook.event != event.event_name() || !hook.is_valid_protocol() {
@@ -65,7 +65,10 @@ pub async fn dispatch_hooks_with_count(
                 if let Some(context) = result.additional_context.filter(|value| !value.is_empty()) {
                     additional_contexts.push(context);
                 }
-                auto_continue |= result.auto_continue.unwrap_or(false);
+                if let Some(msg) = result.system_message.filter(|value| !value.is_empty()) {
+                    additional_contexts.push(msg);
+                }
+                resume |= result.resume.unwrap_or(false);
             }
         }
     }
@@ -75,7 +78,7 @@ pub async fn dispatch_hooks_with_count(
         result: HookResult {
             additional_context: (!additional_contexts.is_empty())
                 .then(|| additional_contexts.join("\n")),
-            auto_continue: auto_continue.then_some(true),
+            resume: resume.then_some(true),
             ..HookResult::default()
         },
     }
@@ -182,8 +185,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatch_includes_auto_continue_count_in_payload() {
-        let cwd = temp_test_dir("auto-continue-count");
+    async fn test_dispatch_includes_resume_count_in_payload() {
+        let cwd = temp_test_dir("resume-count");
         let marker = cwd.join("payload.json");
         let hooks = vec![hook_config(
             "PreToolUse",
@@ -201,6 +204,6 @@ mod tests {
 
         assert!(matches!(outcome.control, HookResultControl::Continue));
         let payload = fs::read_to_string(&marker).expect("read payload marker");
-        assert!(payload.contains("\"auto_continue_count\":4"));
+        assert!(payload.contains("\"resume_count\":4"));
     }
 }

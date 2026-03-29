@@ -13,9 +13,9 @@
 //! SessionStart, SessionEnd, UserPromptSubmit, Stop, StopFailure,
 //! PreToolUse, PostToolUse, PostToolUseFailure, InstructionsLoaded, CwdChanged
 //!
-//! ## Auto-Continue
-//! Stop hooks can return {"auto_continue": true, "additional_context": "..."} to
-//! trigger another LLM turn. max_auto_continue prevents infinite loops.
+//! ## Resume
+//! Stop hooks can return {"resume": true, "additionalContext": "..."} to
+//! trigger another LLM turn. max_resume prevents infinite loops.
 //!
 //! Compatible with Claude Code, Cursor, GitHub Copilot, and Gemini CLI.
 

@@ -46,9 +46,9 @@ impl HookConfig {
 /// Configuration for all hooks (global or per-agent)
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct HooksConfig {
-    /// Maximum number of auto-continue iterations
+    /// Maximum number of resume iterations
     #[serde(default)]
-    pub max_auto_continue: Option<u32>,
+    pub max_resume: Option<u32>,
 
     /// List of hook entries
     #[serde(default)]
@@ -61,7 +61,7 @@ impl HooksConfig {
     /// Rules:
     /// - Agent entries extend global entries (both lists are combined)
     /// - If agent and global have entries with the same `event` AND same `matcher`, agent takes priority (replaces)
-    /// - `max_auto_continue`: agent value overrides global if agent value is Some
+    /// - `max_resume`: agent value overrides global if agent value is Some
     pub fn merge(global: &HooksConfig, agent: &HooksConfig) -> HooksConfig {
         // Start with global entries
         let mut merged_entries = global.entries.clone();
@@ -81,11 +81,11 @@ impl HooksConfig {
             }
         }
 
-        // Determine max_auto_continue: agent overrides global if Some
-        let max_auto_continue = agent.max_auto_continue.or(global.max_auto_continue);
+        // Determine max_resume: agent overrides global if Some
+        let max_resume = agent.max_resume.or(global.max_resume);
 
         HooksConfig {
-            max_auto_continue,
+            max_resume,
             entries: merged_entries,
         }
     }
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn test_hooks_config_parse() {
         let yaml = r#"
-max_auto_continue: 3
+max_resume: 3
 entries:
   - event: Stop
     command: "/path/to/hook.sh"
@@ -108,7 +108,7 @@ entries:
 
         let config: HooksConfig = serde_yaml::from_str(yaml).expect("parse hooks config");
 
-        assert_eq!(config.max_auto_continue, Some(3));
+        assert_eq!(config.max_resume, Some(3));
         assert_eq!(config.entries.len(), 1);
 
         let entry = &config.entries[0];
@@ -123,7 +123,7 @@ entries:
     #[test]
     fn test_hooks_config_merge() {
         let global = HooksConfig {
-            max_auto_continue: Some(5),
+            max_resume: Some(5),
             entries: vec![
                 HookConfig {
                     event: "Stop".to_string(),
@@ -145,7 +145,7 @@ entries:
         };
 
         let agent = HooksConfig {
-            max_auto_continue: Some(3),
+            max_resume: Some(3),
             entries: vec![HookConfig {
                 event: "PreToolUse".to_string(),
                 matcher: Some("shell".to_string()),
@@ -158,8 +158,8 @@ entries:
 
         let merged = HooksConfig::merge(&global, &agent);
 
-        // Agent max_auto_continue should win
-        assert_eq!(merged.max_auto_continue, Some(3));
+        // Agent max_resume should win
+        assert_eq!(merged.max_resume, Some(3));
 
         // Should have 3 entries: 2 from global + 1 from agent
         assert_eq!(merged.entries.len(), 3);
@@ -174,7 +174,7 @@ entries:
     #[test]
     fn test_hooks_config_merge_conflict() {
         let global = HooksConfig {
-            max_auto_continue: Some(5),
+            max_resume: Some(5),
             entries: vec![HookConfig {
                 event: "PreToolUse".to_string(),
                 matcher: Some("shell".to_string()),
@@ -186,7 +186,7 @@ entries:
         };
 
         let agent = HooksConfig {
-            max_auto_continue: None,
+            max_resume: None,
             entries: vec![HookConfig {
                 event: "PreToolUse".to_string(),
                 matcher: Some("shell".to_string()),
@@ -199,8 +199,8 @@ entries:
 
         let merged = HooksConfig::merge(&global, &agent);
 
-        // Global max_auto_continue should be used (agent is None)
-        assert_eq!(merged.max_auto_continue, Some(5));
+        // Global max_resume should be used (agent is None)
+        assert_eq!(merged.max_resume, Some(5));
 
         // Should have only 1 entry (agent replaced global)
         assert_eq!(merged.entries.len(), 1);
@@ -215,7 +215,7 @@ entries:
     fn test_hooks_config_default() {
         let config = HooksConfig::default();
 
-        assert!(config.max_auto_continue.is_none());
+        assert!(config.max_resume.is_none());
         assert!(config.entries.is_empty());
     }
 
