@@ -11,9 +11,20 @@ pub async fn dispatch_hooks(
     session_id: &str,
     cwd: &Path,
 ) -> HookOutcome {
+    dispatch_hooks_with_count(event, hooks, session_id, cwd, 0).await
+}
+
+pub async fn dispatch_hooks_with_count(
+    event: &HookEvent,
+    hooks: &[HookConfig],
+    session_id: &str,
+    cwd: &Path,
+    auto_continue_count: u32,
+) -> HookOutcome {
     let payload = HookPayload {
         session_id: session_id.to_string(),
         cwd: cwd.to_path_buf(),
+        auto_continue_count,
         hook_event: event.clone(),
     };
 
@@ -72,7 +83,7 @@ pub async fn dispatch_hooks(
 
 #[cfg(test)]
 mod tests {
-    use super::dispatch_hooks;
+    use super::{dispatch_hooks, dispatch_hooks_with_count};
     use crate::hooks::{HookConfig, HookEvent, HookResultControl};
     use serde_json::json;
     use std::fs;
@@ -168,5 +179,28 @@ mod tests {
         }
         assert!(blocked_marker.exists());
         assert!(!second_marker.exists());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_includes_auto_continue_count_in_payload() {
+        let cwd = temp_test_dir("auto-continue-count");
+        let marker = cwd.join("payload.json");
+        let hooks = vec![hook_config(
+            "PreToolUse",
+            format!("python -c \"import sys, pathlib; pathlib.Path(r'{}').write_text(sys.stdin.read())\"", marker.display()),
+        )];
+
+        let outcome = dispatch_hooks_with_count(
+            &pre_tool_use_event("shell"),
+            &hooks,
+            "session-3",
+            &cwd,
+            4,
+        )
+        .await;
+
+        assert!(matches!(outcome.control, HookResultControl::Continue));
+        let payload = fs::read_to_string(&marker).expect("read payload marker");
+        assert!(payload.contains("\"auto_continue_count\":4"));
     }
 }

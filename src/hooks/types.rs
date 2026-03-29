@@ -6,6 +6,8 @@ use std::path::PathBuf;
 pub struct HookPayload {
     pub session_id: String,
     pub cwd: PathBuf,
+    #[serde(default)]
+    pub auto_continue_count: u32,
     #[serde(flatten)]
     pub hook_event: HookEvent,
 }
@@ -111,6 +113,7 @@ mod tests {
         let payload = HookPayload {
             session_id: "session-123".to_string(),
             cwd: PathBuf::from("/tmp/project"),
+            auto_continue_count: 2,
             hook_event: HookEvent::PreToolUse {
                 tool_name: "shell".to_string(),
                 tool_input: json!({"command": "echo hi"}),
@@ -130,6 +133,7 @@ mod tests {
             Value::String("session-123".to_string())
         );
         assert_eq!(value["cwd"], Value::String("/tmp/project".to_string()));
+        assert_eq!(value["auto_continue_count"], Value::from(2));
     }
 
     #[test]

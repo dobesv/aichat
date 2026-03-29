@@ -9,6 +9,10 @@ pub async fn execute_command_hook(
     command: &str,
     timeout_secs: Option<u64>,
 ) -> HookOutcome {
+    let event_name = payload.hook_event.event_name();
+    debug!("Dispatching hook for event '{}': command='{}'", event_name, command);
+    let started_at = std::time::Instant::now();
+    
     let shell = default_shell();
     let shell_arg = default_shell_arg();
 
@@ -49,6 +53,10 @@ pub async fn execute_command_hook(
         Some(output) => output,
         None => return continue_with_default(),
     };
+
+    let elapsed = started_at.elapsed().as_millis();
+    let exit_code = output.status.code().unwrap_or(-1);
+    debug!("Hook for '{}' completed: exit_code={}, duration={}ms", event_name, exit_code, elapsed);
 
     match output.status.code() {
         Some(0) => parse_success_output(&output.stdout),
@@ -200,6 +208,7 @@ mod tests {
         HookPayload {
             session_id: "session-123".to_string(),
             cwd: cwd.to_path_buf(),
+            auto_continue_count: 0,
             hook_event: HookEvent::PreToolUse {
                 tool_name: "shell".to_string(),
                 tool_input: json!({"command": "pwd"}),

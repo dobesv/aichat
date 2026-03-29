@@ -21,7 +21,7 @@ use crate::config::{
     ensure_parent_exists, list_agents, load_env_file, macro_execute, Config, GlobalConfig, Input,
     WorkingMode, CODE_ROLE, EXPLAIN_SHELL_ROLE, SHELL_ROLE, TEMP_SESSION_NAME,
 };
-use crate::hooks::{dispatch_hooks, HookEvent, HookResultControl};
+use crate::hooks::{dispatch_hooks, dispatch_hooks_with_count, HookEvent, HookResultControl};
 use crate::render::render_error;
 use crate::repl::Repl;
 use crate::utils::*;
@@ -181,8 +181,7 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
     config.write().apply_prelude()?;
     match is_repl {
         false => {
-            let mut input = create_input(&config, text, &cli.file, abort_signal.clone()).await?;
-            input.use_embeddings(abort_signal.clone()).await?;
+            let input = create_input(&config, text, &cli.file, abort_signal.clone()).await?;
             dispatch_session_start(&config, "cmd").await;
             let result = start_directive(&config, input, cli.code, abort_signal).await;
             exit_session_with_hook(&config).await?;
@@ -244,6 +243,21 @@ async fn start_directive(
     code_mode: bool,
     abort_signal: AbortSignal,
 ) -> Result<()> {
+    start_directive_inner(config, input, code_mode, abort_signal, 0, true).await
+}
+
+#[async_recursion::async_recursion]
+async fn start_directive_inner(
+    config: &GlobalConfig,
+    mut input: Input,
+    code_mode: bool,
+    abort_signal: AbortSignal,
+    auto_continue_count: u32,
+    with_embeddings: bool,
+) -> Result<()> {
+    if with_embeddings {
+        input.use_embeddings(abort_signal.clone()).await?;
+    }
     let client = input.create_client()?;
     let extract_code = !*IS_STDOUT_TERMINAL && code_mode;
     config.write().before_chat_completion(&input)?;
@@ -252,21 +266,50 @@ async fn start_directive(
     let event = HookEvent::UserPromptSubmit {
         prompt: input_text.clone(),
     };
-    let outcome = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+    let outcome = dispatch_hooks_with_count(
+        &event,
+        &hooks.entries,
+        &session_id,
+        &cwd,
+        auto_continue_count,
+    )
+    .await;
     if let HookResultControl::Block { reason } = outcome.control {
         bail!("{reason}");
     }
     let (output, tool_results) = if !input.stream() || extract_code {
-        call_chat_completions(
+        match call_chat_completions(
             &input,
             true,
             extract_code,
             client.as_ref(),
             abort_signal.clone(),
         )
-        .await?
+        .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                let event = HookEvent::StopFailure {
+                    error: err.to_string(),
+                    error_type: "api_error".to_string(),
+                };
+                let _ = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+                return Err(err);
+            }
+        }
     } else {
-        call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await?
+        match call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                let event = HookEvent::StopFailure {
+                    error: err.to_string(),
+                    error_type: "api_error".to_string(),
+                };
+                let _ = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+                return Err(err);
+            }
+        }
     };
     config
         .write()
@@ -276,7 +319,14 @@ async fn start_directive(
             stop_hook_active: true,
             last_assistant_message: Some(output.clone()),
         };
-        let stop_outcome = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+        let stop_outcome = dispatch_hooks_with_count(
+            &event,
+            &hooks.entries,
+            &session_id,
+            &cwd,
+            auto_continue_count,
+        )
+        .await;
         if let Some(additional_context) = stop_outcome
             .result
             .additional_context
@@ -293,16 +343,44 @@ async fn start_directive(
     };
 
     if !tool_results.is_empty() {
-        start_directive(
+        return start_directive_inner(
             config,
             input.merge_tool_results(output, tool_results),
             code_mode,
             abort_signal,
+            auto_continue_count,
+            false,
         )
-        .await?;
+        .await;
     }
 
-    let _ = stop_outcome;
+    if let Some(stop_outcome) = stop_outcome {
+        let max_auto_continue = hooks.max_auto_continue.unwrap_or(5);
+        if stop_outcome.result.auto_continue.unwrap_or(false)
+            && auto_continue_count < max_auto_continue
+        {
+            if abort_signal.aborted() {
+                return Ok(());
+            }
+
+            let context = stop_outcome
+                .result
+                .additional_context
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "Continue working on pending tasks.".to_string());
+            let new_input = Input::from_str(config, &context, None);
+            return start_directive_inner(
+                config,
+                new_input,
+                code_mode,
+                abort_signal,
+                auto_continue_count + 1,
+                true,
+            )
+            .await;
+        }
+    }
+
     Ok(())
 }
 

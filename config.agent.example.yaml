@@ -9,3 +9,10 @@ agent_prelude: null              # Set a session to use when starting the agent.
 instructions: null               # Override the instructions for the agent, have no effect for dynamic instructions
 variables:                       # Custom default values for the agent variables
   <key>: <value>
+
+# ---- hooks ----
+# hooks:                          # Per-agent hooks (merged with global)
+#   max_auto_continue: 3          # Agent-specific limit
+#   entries:
+#   - event: Stop                 # Fire after LLM responds
+#     command: "/path/to/agent-hook.sh"
