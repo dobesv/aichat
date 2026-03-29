@@ -7,7 +7,7 @@ pub struct HookPayload {
     pub session_id: String,
     pub cwd: PathBuf,
     #[serde(default)]
-    pub auto_continue_count: u32,
+    pub resume_count: u32,
     #[serde(flatten)]
     pub hook_event: HookEvent,
 }
@@ -87,13 +87,16 @@ pub enum HookResultControl {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HookResult {
     #[serde(default)]
     pub additional_context: Option<String>,
     #[serde(default)]
-    pub auto_continue: Option<bool>,
+    pub resume: Option<bool>,
     #[serde(default)]
     pub updated_input: Option<Value>,
+    #[serde(default)]
+    pub system_message: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -113,7 +116,7 @@ mod tests {
         let payload = HookPayload {
             session_id: "session-123".to_string(),
             cwd: PathBuf::from("/tmp/project"),
-            auto_continue_count: 2,
+            resume_count: 2,
             hook_event: HookEvent::PreToolUse {
                 tool_name: "shell".to_string(),
                 tool_input: json!({"command": "echo hi"}),
@@ -133,16 +136,16 @@ mod tests {
             Value::String("session-123".to_string())
         );
         assert_eq!(value["cwd"], Value::String("/tmp/project".to_string()));
-        assert_eq!(value["auto_continue_count"], Value::from(2));
+        assert_eq!(value["resume_count"], Value::from(2));
     }
 
     #[test]
     fn test_hook_result_deserialization() {
         let result: HookResult =
-            serde_json::from_str(r#"{"auto_continue":true,"additional_context":"keep going"}"#)
+            serde_json::from_str(r#"{"resume":true,"additionalContext":"keep going"}"#)
                 .expect("deserialize hook result");
 
-        assert_eq!(result.auto_continue, Some(true));
+        assert_eq!(result.resume, Some(true));
         assert_eq!(result.additional_context.as_deref(), Some("keep going"));
         assert!(result.updated_input.is_none());
     }
@@ -152,7 +155,7 @@ mod tests {
         let result: HookResult = serde_json::from_str("{}").expect("deserialize empty hook result");
 
         assert!(result.additional_context.is_none());
-        assert!(result.auto_continue.is_none());
+        assert!(result.resume.is_none());
         assert!(result.updated_input.is_none());
     }
 

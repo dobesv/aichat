@@ -208,7 +208,7 @@ mod tests {
         HookPayload {
             session_id: "session-123".to_string(),
             cwd: cwd.to_path_buf(),
-            auto_continue_count: 0,
+            resume_count: 0,
             hook_event: HookEvent::PreToolUse {
                 tool_name: "shell".to_string(),
                 tool_input: json!({"command": "pwd"}),
@@ -286,7 +286,7 @@ mod tests {
 
         assert!(matches!(outcome.control, HookResultControl::Continue));
         assert!(outcome.result.additional_context.is_none());
-        assert!(outcome.result.auto_continue.is_none());
+        assert!(outcome.result.resume.is_none());
         assert!(outcome.result.updated_input.is_none());
     }
 

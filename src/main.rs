@@ -252,7 +252,7 @@ async fn start_directive_inner(
     mut input: Input,
     code_mode: bool,
     abort_signal: AbortSignal,
-    auto_continue_count: u32,
+    resume_count: u32,
     with_embeddings: bool,
 ) -> Result<()> {
     if with_embeddings {
@@ -271,7 +271,7 @@ async fn start_directive_inner(
         &hooks.entries,
         &session_id,
         &cwd,
-        auto_continue_count,
+        resume_count,
     )
     .await;
     if let HookResultControl::Block { reason } = outcome.control {
@@ -324,7 +324,7 @@ async fn start_directive_inner(
             &hooks.entries,
             &session_id,
             &cwd,
-            auto_continue_count,
+            resume_count,
         )
         .await;
         if let Some(additional_context) = stop_outcome
@@ -348,16 +348,16 @@ async fn start_directive_inner(
             input.merge_tool_results(output, tool_results),
             code_mode,
             abort_signal,
-            auto_continue_count,
+            resume_count,
             false,
         )
         .await;
     }
 
     if let Some(stop_outcome) = stop_outcome {
-        let max_auto_continue = hooks.max_auto_continue.unwrap_or(5);
-        if stop_outcome.result.auto_continue.unwrap_or(false)
-            && auto_continue_count < max_auto_continue
+        let max_resume = hooks.max_resume.unwrap_or(5);
+        if stop_outcome.result.resume.unwrap_or(false)
+            && resume_count < max_resume
         {
             if abort_signal.aborted() {
                 return Ok(());
@@ -374,7 +374,7 @@ async fn start_directive_inner(
                 new_input,
                 code_mode,
                 abort_signal,
-                auto_continue_count + 1,
+                resume_count + 1,
                 true,
             )
             .await;

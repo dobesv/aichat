@@ -763,7 +763,7 @@ async fn ask_inner(
     abort_signal: AbortSignal,
     mut input: Input,
     with_embeddings: bool,
-    auto_continue_count: u32,
+    resume_count: u32,
 ) -> Result<()> {
     if input.is_empty() {
         return Ok(());
@@ -830,7 +830,7 @@ async fn ask_inner(
             &hooks.entries,
             &session_id,
             &cwd,
-            auto_continue_count,
+            resume_count,
         )
         .await;
         if let Some(additional_context) = stop_outcome
@@ -853,7 +853,7 @@ async fn ask_inner(
             abort_signal,
             input.merge_tool_results(output, tool_results),
             false,
-            auto_continue_count,
+            resume_count,
         )
         .await
     } else {
@@ -869,9 +869,9 @@ async fn ask_inner(
                     .to_string();
                 (hooks, session_id, env::current_dir().unwrap_or_default())
             };
-            let max_auto_continue = hooks.max_auto_continue.unwrap_or(5);
-            if stop_outcome.result.auto_continue.unwrap_or(false)
-                && auto_continue_count < max_auto_continue
+            let max_resume = hooks.max_resume.unwrap_or(5);
+            if stop_outcome.result.resume.unwrap_or(false)
+                && resume_count < max_resume
             {
                 if abort_signal.aborted() {
                     return Ok(());
@@ -888,7 +888,7 @@ async fn ask_inner(
                     abort_signal,
                     new_input,
                     true,
-                    auto_continue_count + 1,
+                    resume_count + 1,
                 )
                 .await;
             }

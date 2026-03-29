@@ -12,7 +12,7 @@ variables:                       # Custom default values for the agent variables
 
 # ---- hooks ----
 # hooks:                          # Per-agent hooks (merged with global)
-#   max_auto_continue: 3          # Agent-specific limit
+#   max_resume: 3                 # Agent-specific limit
 #   entries:
 #   - event: Stop                 # Fire after LLM responds
 #     command: "/path/to/agent-hook.sh"
