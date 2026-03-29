@@ -15,7 +15,7 @@ use crate::client::{
     Model, ModelType, ProviderModels, OPENAI_COMPATIBLE_PROVIDERS,
 };
 use crate::function::{FunctionDeclaration, Functions, ToolResult};
-use crate::hooks::HooksConfig;
+use crate::hooks::{AsyncHookManager, HooksConfig};
 use crate::rag::Rag;
 use crate::render::{MarkdownRender, RenderOptions};
 use crate::repl::{run_repl_command, split_args_text};
@@ -2506,10 +2506,19 @@ pub async fn macro_execute(
     config.discontinuous_last_message();
     let config = Arc::new(RwLock::new(config));
     config.write().macro_flag = true;
+    let mut async_manager = AsyncHookManager::new();
+    let mut pending_async_context = None;
     for step in &macro_value.steps {
         let command = Macro::interpolate_command(step, &variables);
         println!(">> {}", multiline_text(&command));
-        run_repl_command(&config, abort_signal.clone(), &command).await?;
+        run_repl_command(
+            &config,
+            abort_signal.clone(),
+            &command,
+            &mut async_manager,
+            &mut pending_async_context,
+        )
+        .await?;
     }
     Ok(())
 }

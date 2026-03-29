@@ -26,6 +26,9 @@ pub struct HookConfig {
     #[serde(default)]
     pub status_message: Option<String>,
 
+    #[serde(default, rename = "async")]
+    pub async_hook: Option<bool>,
+
     /// Protocol version (default "claude-code")
     #[serde(default)]
     pub protocol: Option<String>,
@@ -102,6 +105,7 @@ max_resume: 3
 entries:
   - event: Stop
     command: "/path/to/hook.sh"
+    async: true
     timeout: 10
     protocol: claude-code
 "#;
@@ -118,6 +122,7 @@ entries:
         assert_eq!(entry.protocol, Some("claude-code".to_string()));
         assert!(entry.matcher.is_none());
         assert!(entry.status_message.is_none());
+        assert_eq!(entry.async_hook, Some(true));
     }
 
     #[test]
@@ -131,6 +136,7 @@ entries:
                     command: "global-stop.sh".to_string(),
                     timeout: Some(30),
                     status_message: None,
+                    async_hook: None,
                     protocol: None,
                 },
                 HookConfig {
@@ -139,6 +145,7 @@ entries:
                     command: "global-start.sh".to_string(),
                     timeout: Some(30),
                     status_message: None,
+                    async_hook: None,
                     protocol: None,
                 },
             ],
@@ -152,6 +159,7 @@ entries:
                 command: "agent-tool.sh".to_string(),
                 timeout: Some(15),
                 status_message: None,
+                async_hook: None,
                 protocol: None,
             }],
         };
@@ -181,6 +189,7 @@ entries:
                 command: "global-shell.sh".to_string(),
                 timeout: Some(30),
                 status_message: None,
+                async_hook: None,
                 protocol: None,
             }],
         };
@@ -193,6 +202,7 @@ entries:
                 command: "agent-shell.sh".to_string(),
                 timeout: Some(10),
                 status_message: Some("Agent override".to_string()),
+                async_hook: None,
                 protocol: Some("claude-code".to_string()),
             }],
         };
@@ -228,6 +238,7 @@ entries:
             command: "test.sh".to_string(),
             timeout: Some(30),
             status_message: None,
+            async_hook: None,
             protocol: None,
         };
         assert!(hook1.is_valid_protocol());
@@ -239,6 +250,7 @@ entries:
             command: "test.sh".to_string(),
             timeout: Some(30),
             status_message: None,
+            async_hook: None,
             protocol: Some("claude-code".to_string()),
         };
         assert!(hook2.is_valid_protocol());
@@ -250,6 +262,7 @@ entries:
             command: "test.sh".to_string(),
             timeout: Some(30),
             status_message: None,
+            async_hook: None,
             protocol: Some("future-v2".to_string()),
         };
         assert!(!hook3.is_valid_protocol());

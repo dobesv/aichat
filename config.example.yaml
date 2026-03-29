@@ -327,5 +327,10 @@ clients:
 #   - event: PreToolUse               # Fire before tool execution
 #     matcher: "execute_command"      # Regex to match tool_name
 #     command: "echo 'blocked' >&2; exit 2"  # Exit 2 = block
+#   - event: PostToolUse              # Fire after tool execution
+#     matcher: "Write|Edit"          # Match file-editing tools
+#     command: "/path/to/run-tests.sh"
+#     async: true                     # Run in background without blocking
+#     timeout: 120                    # Longer timeout for async hooks
 #   - event: SessionStart             # Fire at session start
 #     command: "echo 'Session started'"
