@@ -12,8 +12,9 @@ use crate::config::{
     StateFlags,
 };
 use crate::hooks::{
-    dispatch_hooks_with_count_and_manager, dispatch_hooks_with_managers,
-    AsyncHookManager, PersistentHookManager, HookEvent, HookResultControl,
+    dispatch_hooks_with_count_and_manager, dispatch_hooks_with_managers, drain_async_results,
+    inject_pending_async_context, AsyncHookManager, HookEvent, HookResultControl,
+    PersistentHookManager,
 };
 use crate::render::render_error;
 use crate::utils::{
@@ -403,51 +404,6 @@ Type ".help" for additional help.
     }
 }
 
-fn append_pending_context(pending_async_context: &mut Option<String>, context: String) {
-    if context.is_empty() {
-        return;
-    }
-
-    match pending_async_context {
-        Some(existing) if !existing.is_empty() => {
-            existing.push_str("\n\n");
-            existing.push_str(&context);
-        }
-        _ => *pending_async_context = Some(context),
-    }
-}
-
-fn drain_async_results(
-    async_manager: &mut AsyncHookManager,
-    pending_async_context: &mut Option<String>,
-) -> bool {
-    let mut resume = false;
-    if let Some(pending) = async_manager.drain_pending() {
-        if let Some(context) = pending.additional_context.filter(|value| !value.is_empty()) {
-            append_pending_context(pending_async_context, context);
-        }
-        resume = pending.resume.unwrap_or(false);
-    }
-    resume
-}
-
-fn inject_pending_async_context(input: &mut Input, pending_async_context: &mut Option<String>) {
-    let Some(context) = pending_async_context
-        .take()
-        .filter(|value| !value.is_empty())
-    else {
-        return;
-    };
-
-    let input_text = input.text();
-    input.clear_patch();
-    input.set_text(if input_text.is_empty() {
-        context
-    } else {
-        format!("{context}\n\n{input_text}")
-    });
-}
-
 #[derive(Debug, Clone)]
 pub struct ReplCommand {
     name: &'static str,
@@ -542,17 +498,17 @@ pub async fn run_repl_command(
                     Some((name, text)) => {
                         let role = config.read().retrieve_role(name.trim())?;
                         let input = Input::from_str(config, text, Some(role));
-                         ask(
-                             config,
-                             abort_signal.clone(),
-                             input,
-                             false,
-                             async_manager,
-                             persistent_manager,
-                             pending_async_context,
-                             max_resume,
-                         )
-                         .await?;
+                        ask(
+                            config,
+                            abort_signal.clone(),
+                            input,
+                            false,
+                            async_manager,
+                            persistent_manager,
+                            pending_async_context,
+                            max_resume,
+                        )
+                        .await?;
                     }
                     None => {
                         let name = args;
@@ -617,18 +573,18 @@ pub async fn run_repl_command(
                     match text {
                         Some(text) => {
                             println!("{}", dimmed_text(&format!(">> {text}")));
-                             let input = Input::from_str(config, &text, None);
-                             ask(
-                                 config,
-                                 abort_signal.clone(),
-                                 input,
-                                 true,
-                                 async_manager,
-                                 persistent_manager,
-                                 pending_async_context,
-                                 max_resume,
-                             )
-                             .await?;
+                            let input = Input::from_str(config, &text, None);
+                            ask(
+                                config,
+                                abort_signal.clone(),
+                                input,
+                                true,
+                                async_manager,
+                                persistent_manager,
+                                pending_async_context,
+                                max_resume,
+                            )
+                            .await?;
                         }
                         None => {
                             bail!("Invalid starter value");
@@ -907,17 +863,17 @@ pub async fn run_repl_command(
                         _ => line.to_string(),
                     };
                     let input = Input::from_str(config, &input_text, None);
-                     ask(
-                         config,
-                         abort_signal.clone(),
-                         input,
-                         true,
-                         async_manager,
-                         persistent_manager,
-                         pending_async_context,
-                         hooks.max_resume.unwrap_or(5),
-                     )
-                     .await?;
+                    ask(
+                        config,
+                        abort_signal.clone(),
+                        input,
+                        true,
+                        async_manager,
+                        persistent_manager,
+                        pending_async_context,
+                        hooks.max_resume.unwrap_or(5),
+                    )
+                    .await?;
                 }
             }
         }

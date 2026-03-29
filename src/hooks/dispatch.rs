@@ -23,7 +23,8 @@ pub async fn dispatch_hooks_with_manager(
     cwd: &Path,
     async_manager: Option<&AsyncHookManager>,
 ) -> HookOutcome {
-    dispatch_hooks_with_count_and_manager(event, hooks, session_id, cwd, 0, async_manager, None).await
+    dispatch_hooks_with_count_and_manager(event, hooks, session_id, cwd, 0, async_manager, None)
+        .await
 }
 
 pub async fn dispatch_hooks_with_managers(
@@ -34,7 +35,16 @@ pub async fn dispatch_hooks_with_managers(
     async_manager: Option<&AsyncHookManager>,
     persistent_manager: Option<&Arc<TokioMutex<PersistentHookManager>>>,
 ) -> HookOutcome {
-    dispatch_hooks_with_count_and_manager(event, hooks, session_id, cwd, 0, async_manager, persistent_manager).await
+    dispatch_hooks_with_count_and_manager(
+        event,
+        hooks,
+        session_id,
+        cwd,
+        0,
+        async_manager,
+        persistent_manager,
+    )
+    .await
 }
 
 pub async fn dispatch_hooks_with_count(
@@ -45,7 +55,16 @@ pub async fn dispatch_hooks_with_count(
     resume_count: u32,
     persistent_manager: Option<&Arc<TokioMutex<PersistentHookManager>>>,
 ) -> HookOutcome {
-    dispatch_hooks_with_count_and_manager(event, hooks, session_id, cwd, resume_count, None, persistent_manager).await
+    dispatch_hooks_with_count_and_manager(
+        event,
+        hooks,
+        session_id,
+        cwd,
+        resume_count,
+        None,
+        persistent_manager,
+    )
+    .await
 }
 
 pub async fn dispatch_hooks_with_count_and_manager(
@@ -96,7 +115,11 @@ pub async fn dispatch_hooks_with_count_and_manager(
 
         if hook.hook_type == "claude-command-persistent" {
             if let Some(pm) = persistent_manager {
-                let outcome = pm.lock().await.send_event(&hook.command, &payload, hook.timeout).await;
+                let outcome = pm
+                    .lock()
+                    .await
+                    .send_event(&hook.command, &payload, hook.timeout)
+                    .await;
                 let HookOutcome { control, result } = outcome;
 
                 match control {
@@ -107,7 +130,9 @@ pub async fn dispatch_hooks_with_count_and_manager(
                         };
                     }
                     HookResultControl::Continue => {
-                        if let Some(context) = result.additional_context.filter(|value| !value.is_empty()) {
+                        if let Some(context) =
+                            result.additional_context.filter(|value| !value.is_empty())
+                        {
                             additional_contexts.push(context);
                         }
                         if let Some(msg) = result.system_message.filter(|value| !value.is_empty()) {
@@ -274,9 +299,15 @@ mod tests {
             format!("python -c \"import sys, pathlib; pathlib.Path(r'{}').write_text(sys.stdin.read())\"", marker.display()),
         )];
 
-        let outcome =
-            dispatch_hooks_with_count(&pre_tool_use_event("shell"), &hooks, "session-3", &cwd, 4, None)
-                .await;
+        let outcome = dispatch_hooks_with_count(
+            &pre_tool_use_event("shell"),
+            &hooks,
+            "session-3",
+            &cwd,
+            4,
+            None,
+        )
+        .await;
 
         assert!(matches!(outcome.control, HookResultControl::Continue));
         let payload = fs::read_to_string(&marker).expect("read payload marker");

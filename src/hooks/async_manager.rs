@@ -1,3 +1,4 @@
+use crate::config::Input;
 use crate::hooks::{executor::execute_command_hook, HookPayload, HookResult};
 
 use tokio::sync::mpsc;
@@ -51,6 +52,51 @@ impl AsyncHookManager {
             })
         }
     }
+}
+
+pub fn append_pending_context(pending_async_context: &mut Option<String>, context: String) {
+    if context.is_empty() {
+        return;
+    }
+
+    match pending_async_context {
+        Some(existing) if !existing.is_empty() => {
+            existing.push_str("\n\n");
+            existing.push_str(&context);
+        }
+        _ => *pending_async_context = Some(context),
+    }
+}
+
+pub fn drain_async_results(
+    async_manager: &mut AsyncHookManager,
+    pending_async_context: &mut Option<String>,
+) -> bool {
+    let mut resume = false;
+    if let Some(pending) = async_manager.drain_pending() {
+        if let Some(context) = pending.additional_context.filter(|value| !value.is_empty()) {
+            append_pending_context(pending_async_context, context);
+        }
+        resume = pending.resume.unwrap_or(false);
+    }
+    resume
+}
+
+pub fn inject_pending_async_context(input: &mut Input, pending_async_context: &mut Option<String>) {
+    let Some(context) = pending_async_context
+        .take()
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+
+    let input_text = input.text();
+    input.clear_patch();
+    input.set_text(if input_text.is_empty() {
+        context
+    } else {
+        format!("{context}\n\n{input_text}")
+    });
 }
 
 #[cfg(test)]

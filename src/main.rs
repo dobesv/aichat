@@ -22,8 +22,9 @@ use crate::config::{
     WorkingMode, CODE_ROLE, EXPLAIN_SHELL_ROLE, SHELL_ROLE, TEMP_SESSION_NAME,
 };
 use crate::hooks::{
-    dispatch_hooks_with_count_and_manager, dispatch_hooks_with_managers,
-    AsyncHookManager, PersistentHookManager, HookEvent, HookResultControl,
+    dispatch_hooks_with_count_and_manager, dispatch_hooks_with_managers, drain_async_results,
+    inject_pending_async_context, AsyncHookManager, HookEvent, HookResultControl,
+    PersistentHookManager,
 };
 use crate::render::render_error;
 use crate::repl::Repl;
@@ -186,7 +187,8 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
         false => {
             let input = create_input(&config, text, &cli.file, abort_signal.clone()).await?;
             let mut async_manager = AsyncHookManager::new();
-            let persistent_manager = Arc::new(tokio::sync::Mutex::new(PersistentHookManager::new()));
+            let persistent_manager =
+                Arc::new(tokio::sync::Mutex::new(PersistentHookManager::new()));
             let mut pending_async_context = None;
             dispatch_session_start(&config, "cmd", &async_manager, &persistent_manager).await;
             let result = start_directive(
@@ -210,51 +212,6 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
             start_interactive(&config).await
         }
     }
-}
-
-fn append_pending_context(pending_async_context: &mut Option<String>, context: String) {
-    if context.is_empty() {
-        return;
-    }
-
-    match pending_async_context {
-        Some(existing) if !existing.is_empty() => {
-            existing.push_str("\n\n");
-            existing.push_str(&context);
-        }
-        _ => *pending_async_context = Some(context),
-    }
-}
-
-fn drain_async_results(
-    async_manager: &mut AsyncHookManager,
-    pending_async_context: &mut Option<String>,
-) -> bool {
-    let mut resume = false;
-    if let Some(pending) = async_manager.drain_pending() {
-        if let Some(context) = pending.additional_context.filter(|value| !value.is_empty()) {
-            append_pending_context(pending_async_context, context);
-        }
-        resume = pending.resume.unwrap_or(false);
-    }
-    resume
-}
-
-fn inject_pending_async_context(input: &mut Input, pending_async_context: &mut Option<String>) {
-    let Some(context) = pending_async_context
-        .take()
-        .filter(|value| !value.is_empty())
-    else {
-        return;
-    };
-
-    let input_text = input.text();
-    input.clear_patch();
-    input.set_text(if input_text.is_empty() {
-        context
-    } else {
-        format!("{context}\n\n{input_text}")
-    });
 }
 
 fn hook_dispatch_context(config: &GlobalConfig) -> (crate::hooks::HooksConfig, String, PathBuf) {
