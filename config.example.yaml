@@ -334,6 +334,10 @@ clients:
 #     command: "/path/to/run-tests.sh"
 #     async: true                     # Run in background without blocking
 #     timeout: 120                    # Longer timeout for async hooks
+#   - event: Stop                     # Fire after LLM responds
+#     type: claude-command-persistent  # Long-running JSONL hook process
+#     command: "/path/to/persistent-hook.sh"
+#     timeout: 30                     # Timeout per event (default: 30)
 #   - event: SessionStart             # Fire at session start
 #     type: claude-command
 #     command: "echo 'Session started'"

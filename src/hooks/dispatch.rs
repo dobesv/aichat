@@ -1,9 +1,11 @@
 use crate::hooks::{
     executor::execute_command_hook, AsyncHookManager, CompiledMatcher, HookConfig, HookEvent,
-    HookOutcome, HookPayload, HookResult, HookResultControl,
+    HookOutcome, HookPayload, HookResult, HookResultControl, PersistentHookManager,
 };
 
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
 pub async fn dispatch_hooks(
     event: &HookEvent,
@@ -11,7 +13,7 @@ pub async fn dispatch_hooks(
     session_id: &str,
     cwd: &Path,
 ) -> HookOutcome {
-    dispatch_hooks_with_count(event, hooks, session_id, cwd, 0).await
+    dispatch_hooks_with_count(event, hooks, session_id, cwd, 0, None).await
 }
 
 pub async fn dispatch_hooks_with_manager(
@@ -21,7 +23,18 @@ pub async fn dispatch_hooks_with_manager(
     cwd: &Path,
     async_manager: Option<&AsyncHookManager>,
 ) -> HookOutcome {
-    dispatch_hooks_with_count_and_manager(event, hooks, session_id, cwd, 0, async_manager).await
+    dispatch_hooks_with_count_and_manager(event, hooks, session_id, cwd, 0, async_manager, None).await
+}
+
+pub async fn dispatch_hooks_with_managers(
+    event: &HookEvent,
+    hooks: &[HookConfig],
+    session_id: &str,
+    cwd: &Path,
+    async_manager: Option<&AsyncHookManager>,
+    persistent_manager: Option<&Arc<TokioMutex<PersistentHookManager>>>,
+) -> HookOutcome {
+    dispatch_hooks_with_count_and_manager(event, hooks, session_id, cwd, 0, async_manager, persistent_manager).await
 }
 
 pub async fn dispatch_hooks_with_count(
@@ -30,8 +43,9 @@ pub async fn dispatch_hooks_with_count(
     session_id: &str,
     cwd: &Path,
     resume_count: u32,
+    persistent_manager: Option<&Arc<TokioMutex<PersistentHookManager>>>,
 ) -> HookOutcome {
-    dispatch_hooks_with_count_and_manager(event, hooks, session_id, cwd, resume_count, None).await
+    dispatch_hooks_with_count_and_manager(event, hooks, session_id, cwd, resume_count, None, persistent_manager).await
 }
 
 pub async fn dispatch_hooks_with_count_and_manager(
@@ -41,6 +55,7 @@ pub async fn dispatch_hooks_with_count_and_manager(
     cwd: &Path,
     resume_count: u32,
     async_manager: Option<&AsyncHookManager>,
+    persistent_manager: Option<&Arc<TokioMutex<PersistentHookManager>>>,
 ) -> HookOutcome {
     let payload = HookPayload {
         session_id: session_id.to_string(),
@@ -75,6 +90,32 @@ pub async fn dispatch_hooks_with_count_and_manager(
         if hook.async_hook == Some(true) {
             if let Some(manager) = async_manager {
                 manager.spawn_hook(payload.clone(), hook.command.clone(), hook.timeout);
+            }
+            continue;
+        }
+
+        if hook.hook_type == "claude-command-persistent" {
+            if let Some(pm) = persistent_manager {
+                let outcome = pm.lock().await.send_event(&hook.command, &payload, hook.timeout).await;
+                let HookOutcome { control, result } = outcome;
+
+                match control {
+                    HookResultControl::Block { reason } => {
+                        return HookOutcome {
+                            control: HookResultControl::Block { reason },
+                            result,
+                        };
+                    }
+                    HookResultControl::Continue => {
+                        if let Some(context) = result.additional_context.filter(|value| !value.is_empty()) {
+                            additional_contexts.push(context);
+                        }
+                        if let Some(msg) = result.system_message.filter(|value| !value.is_empty()) {
+                            additional_contexts.push(msg);
+                        }
+                        resume |= result.resume.unwrap_or(false);
+                    }
+                }
             }
             continue;
         }
@@ -233,14 +274,9 @@ mod tests {
             format!("python -c \"import sys, pathlib; pathlib.Path(r'{}').write_text(sys.stdin.read())\"", marker.display()),
         )];
 
-        let outcome = dispatch_hooks_with_count(
-            &pre_tool_use_event("shell"),
-            &hooks,
-            "session-3",
-            &cwd,
-            4,
-        )
-        .await;
+        let outcome =
+            dispatch_hooks_with_count(&pre_tool_use_event("shell"), &hooks, "session-3", &cwd, 4, None)
+                .await;
 
         assert!(matches!(outcome.control, HookResultControl::Continue));
         let payload = fs::read_to_string(&marker).expect("read payload marker");
@@ -265,6 +301,7 @@ mod tests {
             &cwd,
             0,
             Some(&manager),
+            None,
         )
         .await;
 

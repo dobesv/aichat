@@ -22,8 +22,8 @@ use crate::config::{
     WorkingMode, CODE_ROLE, EXPLAIN_SHELL_ROLE, SHELL_ROLE, TEMP_SESSION_NAME,
 };
 use crate::hooks::{
-    dispatch_hooks_with_count_and_manager, dispatch_hooks_with_manager, AsyncHookManager,
-    HookEvent, HookResultControl,
+    dispatch_hooks_with_count_and_manager, dispatch_hooks_with_managers,
+    AsyncHookManager, PersistentHookManager, HookEvent, HookResultControl,
 };
 use crate::render::render_error;
 use crate::repl::Repl;
@@ -186,18 +186,21 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
         false => {
             let input = create_input(&config, text, &cli.file, abort_signal.clone()).await?;
             let mut async_manager = AsyncHookManager::new();
+            let persistent_manager = Arc::new(tokio::sync::Mutex::new(PersistentHookManager::new()));
             let mut pending_async_context = None;
-            dispatch_session_start(&config, "cmd", &async_manager).await;
+            dispatch_session_start(&config, "cmd", &async_manager, &persistent_manager).await;
             let result = start_directive(
                 &config,
                 input,
                 cli.code,
                 abort_signal,
                 &mut async_manager,
+                &persistent_manager,
                 &mut pending_async_context,
             )
             .await;
-            exit_session_with_hook(&config, &async_manager).await?;
+            exit_session_with_hook(&config, &async_manager, &persistent_manager).await?;
+            persistent_manager.lock().await.shutdown();
             result
         }
         true => {
@@ -238,7 +241,10 @@ fn drain_async_results(
 }
 
 fn inject_pending_async_context(input: &mut Input, pending_async_context: &mut Option<String>) {
-    let Some(context) = pending_async_context.take().filter(|value| !value.is_empty()) else {
+    let Some(context) = pending_async_context
+        .take()
+        .filter(|value| !value.is_empty())
+    else {
         return;
     };
 
@@ -269,6 +275,7 @@ async fn dispatch_session_start(
     config: &GlobalConfig,
     source: &str,
     async_manager: &AsyncHookManager,
+    persistent_manager: &Arc<tokio::sync::Mutex<PersistentHookManager>>,
 ) {
     let (hooks, session_id, cwd) = hook_dispatch_context(config);
     let model_id = config.read().current_model().id().to_string();
@@ -276,12 +283,22 @@ async fn dispatch_session_start(
         source: source.to_string(),
         model: model_id,
     };
-    let _ =
-        dispatch_hooks_with_manager(&event, &hooks.entries, &session_id, &cwd, Some(async_manager))
-            .await;
+    let _ = dispatch_hooks_with_managers(
+        &event,
+        &hooks.entries,
+        &session_id,
+        &cwd,
+        Some(async_manager),
+        Some(persistent_manager),
+    )
+    .await;
 }
 
-async fn exit_session_with_hook(config: &GlobalConfig, async_manager: &AsyncHookManager) -> Result<()> {
+async fn exit_session_with_hook(
+    config: &GlobalConfig,
+    async_manager: &AsyncHookManager,
+    persistent_manager: &Arc<tokio::sync::Mutex<PersistentHookManager>>,
+) -> Result<()> {
     let (hooks, session_id, cwd) = hook_dispatch_context(config);
     config.write().exit_session()?;
     let event = HookEvent::SessionEnd {
@@ -289,7 +306,14 @@ async fn exit_session_with_hook(config: &GlobalConfig, async_manager: &AsyncHook
     };
     let _ = tokio::time::timeout(
         Duration::from_secs(5),
-        dispatch_hooks_with_manager(&event, &hooks.entries, &session_id, &cwd, Some(async_manager)),
+        dispatch_hooks_with_managers(
+            &event,
+            &hooks.entries,
+            &session_id,
+            &cwd,
+            Some(async_manager),
+            Some(persistent_manager),
+        ),
     )
     .await;
     Ok(())
@@ -302,6 +326,7 @@ async fn start_directive(
     code_mode: bool,
     abort_signal: AbortSignal,
     async_manager: &mut AsyncHookManager,
+    persistent_manager: &Arc<tokio::sync::Mutex<PersistentHookManager>>,
     pending_async_context: &mut Option<String>,
 ) -> Result<()> {
     start_directive_inner(
@@ -310,6 +335,7 @@ async fn start_directive(
         code_mode,
         abort_signal,
         async_manager,
+        persistent_manager,
         pending_async_context,
         0,
         true,
@@ -324,6 +350,7 @@ async fn start_directive_inner(
     code_mode: bool,
     abort_signal: AbortSignal,
     async_manager: &mut AsyncHookManager,
+    persistent_manager: &Arc<tokio::sync::Mutex<PersistentHookManager>>,
     pending_async_context: &mut Option<String>,
     resume_count: u32,
     with_embeddings: bool,
@@ -348,6 +375,7 @@ async fn start_directive_inner(
         &cwd,
         resume_count,
         Some(async_manager),
+        Some(persistent_manager),
     )
     .await;
     if let HookResultControl::Block { reason } = outcome.control {
@@ -369,32 +397,33 @@ async fn start_directive_inner(
                     error: err.to_string(),
                     error_type: "api_error".to_string(),
                 };
-                let _ = dispatch_hooks_with_manager(
+                let _ = dispatch_hooks_with_managers(
                     &event,
                     &hooks.entries,
                     &session_id,
                     &cwd,
                     Some(async_manager),
+                    Some(persistent_manager),
                 )
                 .await;
                 return Err(err);
             }
         }
     } else {
-        match call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await
-        {
+        match call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await {
             Ok(result) => result,
             Err(err) => {
                 let event = HookEvent::StopFailure {
                     error: err.to_string(),
                     error_type: "api_error".to_string(),
                 };
-                let _ = dispatch_hooks_with_manager(
+                let _ = dispatch_hooks_with_managers(
                     &event,
                     &hooks.entries,
                     &session_id,
                     &cwd,
                     Some(async_manager),
+                    Some(persistent_manager),
                 )
                 .await;
                 return Err(err);
@@ -416,6 +445,7 @@ async fn start_directive_inner(
             &cwd,
             resume_count,
             Some(async_manager),
+            Some(persistent_manager),
         )
         .await;
         if let Some(additional_context) = stop_outcome
@@ -440,6 +470,7 @@ async fn start_directive_inner(
             code_mode,
             abort_signal,
             async_manager,
+            persistent_manager,
             pending_async_context,
             resume_count,
             false,
@@ -449,9 +480,7 @@ async fn start_directive_inner(
 
     if let Some(stop_outcome) = stop_outcome {
         let max_resume = hooks.max_resume.unwrap_or(5);
-        if stop_outcome.result.resume.unwrap_or(false)
-            && resume_count < max_resume
-        {
+        if stop_outcome.result.resume.unwrap_or(false) && resume_count < max_resume {
             if abort_signal.aborted() {
                 return Ok(());
             }
@@ -468,6 +497,7 @@ async fn start_directive_inner(
                 code_mode,
                 abort_signal,
                 async_manager,
+                persistent_manager,
                 pending_async_context,
                 resume_count + 1,
                 true,
@@ -493,6 +523,7 @@ async fn start_directive_inner(
             code_mode,
             abort_signal,
             async_manager,
+            persistent_manager,
             pending_async_context,
             resume_count + 1,
             true,
@@ -505,10 +536,12 @@ async fn start_directive_inner(
 
 async fn start_interactive(config: &GlobalConfig) -> Result<()> {
     let async_manager = AsyncHookManager::new();
-    dispatch_session_start(config, "repl", &async_manager).await;
-    let mut repl: Repl = Repl::init(config, async_manager)?;
+    let persistent_manager = Arc::new(tokio::sync::Mutex::new(PersistentHookManager::new()));
+    dispatch_session_start(config, "repl", &async_manager, &persistent_manager).await;
+    let mut repl: Repl = Repl::init(config, async_manager, persistent_manager.clone())?;
     let result = repl.run().await;
-    exit_session_with_hook(config, repl.async_manager()).await?;
+    exit_session_with_hook(config, repl.async_manager(), &persistent_manager).await?;
+    persistent_manager.lock().await.shutdown();
     result
 }
 
