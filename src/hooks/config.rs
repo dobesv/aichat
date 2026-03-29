@@ -29,20 +29,17 @@ pub struct HookConfig {
     #[serde(default, rename = "async")]
     pub async_hook: Option<bool>,
 
-    /// Protocol version (default "claude-code")
-    #[serde(default)]
-    pub protocol: Option<String>,
+    /// Hook type. Determines the execution protocol.
+    /// Supported: "claude-command" (subprocess with stdin/stdout JSON).
+    /// Unknown types are silently skipped.
+    #[serde(rename = "type")]
+    pub hook_type: String,
 }
 
 impl HookConfig {
-    /// Check if the protocol is valid
-    /// Returns true if protocol is None (defaults to "claude-code") or explicitly "claude-code"
-    /// Returns false for unknown protocols
-    pub fn is_valid_protocol(&self) -> bool {
-        match &self.protocol {
-            None => true, // Defaults to "claude-code"
-            Some(p) => p == "claude-code",
-        }
+    /// Check if the hook type is supported
+    pub fn is_supported_type(&self) -> bool {
+        self.hook_type == "claude-command"
     }
 }
 
@@ -107,7 +104,7 @@ entries:
     command: "/path/to/hook.sh"
     async: true
     timeout: 10
-    protocol: claude-code
+    type: claude-command
 "#;
 
         let config: HooksConfig = serde_yaml::from_str(yaml).expect("parse hooks config");
@@ -119,7 +116,7 @@ entries:
         assert_eq!(entry.event, "Stop");
         assert_eq!(entry.command, "/path/to/hook.sh");
         assert_eq!(entry.timeout, Some(10));
-        assert_eq!(entry.protocol, Some("claude-code".to_string()));
+        assert_eq!(entry.hook_type, "claude-command");
         assert!(entry.matcher.is_none());
         assert!(entry.status_message.is_none());
         assert_eq!(entry.async_hook, Some(true));
@@ -137,7 +134,7 @@ entries:
                     timeout: Some(30),
                     status_message: None,
                     async_hook: None,
-                    protocol: None,
+                    hook_type: "claude-command".to_string(),
                 },
                 HookConfig {
                     event: "SessionStart".to_string(),
@@ -146,7 +143,7 @@ entries:
                     timeout: Some(30),
                     status_message: None,
                     async_hook: None,
-                    protocol: None,
+                    hook_type: "claude-command".to_string(),
                 },
             ],
         };
@@ -160,7 +157,7 @@ entries:
                 timeout: Some(15),
                 status_message: None,
                 async_hook: None,
-                protocol: None,
+                hook_type: "claude-command".to_string(),
             }],
         };
 
@@ -190,7 +187,7 @@ entries:
                 timeout: Some(30),
                 status_message: None,
                 async_hook: None,
-                protocol: None,
+                hook_type: "claude-command".to_string(),
             }],
         };
 
@@ -203,7 +200,7 @@ entries:
                 timeout: Some(10),
                 status_message: Some("Agent override".to_string()),
                 async_hook: None,
-                protocol: Some("claude-code".to_string()),
+                hook_type: "claude-command".to_string(),
             }],
         };
 
@@ -230,8 +227,8 @@ entries:
     }
 
     #[test]
-    fn test_valid_protocol() {
-        // None should be valid (defaults to "claude-code")
+    fn test_supported_type() {
+        // None should be valid (defaults to "claude-command")
         let hook1 = HookConfig {
             event: "Stop".to_string(),
             matcher: None,
@@ -239,11 +236,11 @@ entries:
             timeout: Some(30),
             status_message: None,
             async_hook: None,
-            protocol: None,
+            hook_type: "claude-command".to_string(),
         };
-        assert!(hook1.is_valid_protocol());
+        assert!(hook1.is_supported_type());
 
-        // "claude-code" should be valid
+        // "claude-command" should be valid
         let hook2 = HookConfig {
             event: "Stop".to_string(),
             matcher: None,
@@ -251,11 +248,11 @@ entries:
             timeout: Some(30),
             status_message: None,
             async_hook: None,
-            protocol: Some("claude-code".to_string()),
+            hook_type: "claude-command".to_string(),
         };
-        assert!(hook2.is_valid_protocol());
+        assert!(hook2.is_supported_type());
 
-        // Unknown protocol should be invalid
+        // Unknown type should be invalid
         let hook3 = HookConfig {
             event: "Stop".to_string(),
             matcher: None,
@@ -263,8 +260,8 @@ entries:
             timeout: Some(30),
             status_message: None,
             async_hook: None,
-            protocol: Some("future-v2".to_string()),
+            hook_type: "future-v2".to_string(),
         };
-        assert!(!hook3.is_valid_protocol());
+        assert!(!hook3.is_supported_type());
     }
 }

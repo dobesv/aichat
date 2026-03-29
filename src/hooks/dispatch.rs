@@ -53,7 +53,7 @@ pub async fn dispatch_hooks_with_count_and_manager(
     let mut resume = false;
 
     for hook in hooks {
-        if hook.event != event.event_name() || !hook.is_valid_protocol() {
+        if hook.event != event.event_name() || !hook.is_supported_type() {
             continue;
         }
 
@@ -148,7 +148,7 @@ mod tests {
             timeout: Some(5),
             status_message: None,
             async_hook: None,
-            protocol: None,
+            hook_type: "claude-command".to_string(),
         }
     }
 

@@ -321,16 +321,19 @@ clients:
 #   max_resume: 5                     # Max resume turns (default: 5)
 #   entries:
 #   - event: Stop                     # Fire after LLM responds
+#     type: claude-command            # Hook type (required)
 #     command: "/path/to/hook.sh"     # Shell command to execute
 #     timeout: 30                     # Timeout in seconds (default: 30)
-#     protocol: claude-code           # Protocol (default: claude-code)
 #   - event: PreToolUse               # Fire before tool execution
+#     type: claude-command
 #     matcher: "execute_command"      # Regex to match tool_name
 #     command: "echo 'blocked' >&2; exit 2"  # Exit 2 = block
 #   - event: PostToolUse              # Fire after tool execution
+#     type: claude-command
 #     matcher: "Write|Edit"          # Match file-editing tools
 #     command: "/path/to/run-tests.sh"
 #     async: true                     # Run in background without blocking
 #     timeout: 120                    # Longer timeout for async hooks
 #   - event: SessionStart             # Fire at session start
+#     type: claude-command
 #     command: "echo 'Session started'"
