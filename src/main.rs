@@ -2,6 +2,7 @@ mod cli;
 mod client;
 mod config;
 mod function;
+mod hooks;
 mod rag;
 mod render;
 mod repl;

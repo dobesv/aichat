@@ -215,6 +215,10 @@ impl Agent {
         &self.name
     }
 
+    pub fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+
     pub fn functions(&self) -> &Functions {
         &self.functions
     }
@@ -382,6 +386,9 @@ pub struct AgentConfig {
     pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub variables: AgentVariables,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HooksConfig>,
 }
 
 impl AgentConfig {
