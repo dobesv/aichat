@@ -1,8 +1,10 @@
 use crate::hooks::{HookOutcome, HookPayload, HookResult, HookResultControl};
 
-use std::io::{ErrorKind, Read};
-use std::process::{Child, Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::io::ErrorKind;
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 
 pub async fn execute_command_hook(
     payload: &HookPayload,
@@ -26,6 +28,7 @@ pub async fn execute_command_hook(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
     {
         Ok(child) => child,
@@ -44,17 +47,29 @@ pub async fn execute_command_hook(
     };
 
     if let Some(mut stdin) = child.stdin.take() {
-        if let Err(err) = std::io::Write::write_all(&mut stdin, payload_json.as_bytes()) {
+        if let Err(err) = stdin.write_all(payload_json.as_bytes()).await {
             if err.kind() != ErrorKind::BrokenPipe {
                 warn!("Failed to write hook payload to `{command}` stdin: {err}");
                 return continue_with_default();
             }
         }
+        drop(stdin);
     }
 
-    let output = match wait_for_output(child, timeout_secs, command).await {
-        Some(output) => output,
-        None => return continue_with_default(),
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(30));
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => {
+            warn!("Hook command `{command}` failed: {err}");
+            return continue_with_default();
+        }
+        Err(_) => {
+            warn!(
+                "Hook command `{command}` timed out after {}s",
+                timeout.as_secs()
+            );
+            return continue_with_default();
+        }
     };
 
     let elapsed = started_at.elapsed().as_millis();
@@ -120,65 +135,6 @@ fn continue_with_default() -> HookOutcome {
         control: HookResultControl::Continue,
         result: HookResult::default(),
     }
-}
-
-async fn wait_for_output(
-    mut child: Child,
-    timeout_secs: Option<u64>,
-    command: &str,
-) -> Option<Output> {
-    let timeout = timeout_secs.map(Duration::from_secs);
-    let started_at = Instant::now();
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => match collect_output(&mut child, status) {
-                Ok(output) => return Some(output),
-                Err(err) => {
-                    warn!("Failed reading output from hook command `{command}`: {err}");
-                    return None;
-                }
-            },
-            Ok(None) => {
-                if let Some(timeout) = timeout {
-                    if started_at.elapsed() >= timeout {
-                        warn!(
-                            "Hook command `{command}` timed out after {}s",
-                            timeout.as_secs()
-                        );
-                        if let Err(err) = child.kill() {
-                            warn!("Failed to kill timed out hook command `{command}`: {err}");
-                        }
-                        let _ = child.wait();
-                        return None;
-                    }
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            Err(err) => {
-                warn!("Failed waiting for hook command `{command}`: {err}");
-                return None;
-            }
-        }
-    }
-}
-
-fn collect_output(child: &mut Child, status: std::process::ExitStatus) -> std::io::Result<Output> {
-    let mut stdout = vec![];
-    if let Some(mut handle) = child.stdout.take() {
-        handle.read_to_end(&mut stdout)?;
-    }
-
-    let mut stderr = vec![];
-    if let Some(mut handle) = child.stderr.take() {
-        handle.read_to_end(&mut stderr)?;
-    }
-
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
 }
 
 #[cfg(unix)]

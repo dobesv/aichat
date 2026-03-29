@@ -23,7 +23,9 @@
 //! with `resume: true` can trigger an immediate follow-up turn when the session
 //! loop checks for completed async work.
 //!
-//! Compatible with Claude Code, Cursor, GitHub Copilot, and Gemini CLI.
+//! Protocol follows the Claude Code hooks convention (subprocess, JSON stdin/stdout,
+//! exit codes for control flow). Other coding CLIs (Gemini CLI, Cursor, etc.) use
+//! similar but not identical protocols.
 
 pub mod async_manager;
 pub mod config;
@@ -33,7 +35,10 @@ pub mod matcher;
 pub mod persistent;
 pub mod types;
 
-pub use async_manager::AsyncHookManager;
+#[allow(unused_imports)]
+pub use async_manager::{
+    append_pending_context, drain_async_results, inject_pending_async_context, AsyncHookManager,
+};
 #[allow(unused_imports)]
 pub use config::{HookConfig, HooksConfig};
 #[allow(unused_imports)]
