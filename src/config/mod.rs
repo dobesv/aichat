@@ -15,6 +15,7 @@ use crate::client::{
     Model, ModelType, ProviderModels, OPENAI_COMPATIBLE_PROVIDERS,
 };
 use crate::function::{FunctionDeclaration, Functions, ToolResult};
+use crate::hooks::HooksConfig;
 use crate::rag::Rag;
 use crate::render::{MarkdownRender, RenderOptions};
 use crate::repl::{run_repl_command, split_args_text};
@@ -148,6 +149,10 @@ pub struct Config {
 
     pub clients: Vec<ClientConfig>,
 
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HooksConfig>,
+
     #[serde(skip)]
     pub macro_flag: bool,
     #[serde(skip)]
@@ -222,6 +227,8 @@ impl Default for Config {
             sync_models_url: None,
 
             clients: vec![],
+
+            hooks: None,
 
             macro_flag: false,
             info_flag: false,
@@ -542,6 +549,16 @@ impl Config {
         }
     }
 
+    pub fn resolved_hooks(&self) -> HooksConfig {
+        let global = self.hooks.clone().unwrap_or_default();
+        if let Some(agent) = &self.agent {
+            if let Some(agent_hooks) = &agent.config().hooks {
+                return HooksConfig::merge(&global, agent_hooks);
+            }
+        }
+        global
+    }
+
     pub fn info(&self) -> Result<String> {
         if let Some(agent) = &self.agent {
             let output = agent.export()?;
@@ -615,6 +632,9 @@ impl Config {
             ("functions_dir", display_path(&Self::functions_dir())),
             ("messages_file", display_path(&self.messages_file())),
         ];
+        if let Some(hooks) = &self.hooks {
+            items.push(("hooks", hooks.entries.len().to_string()));
+        }
         if let Ok((_, Some(log_path))) = Self::log_config(self.working_mode.is_serve()) {
             items.push(("log_path", display_path(&log_path)));
         }

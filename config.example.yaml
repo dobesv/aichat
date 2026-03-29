@@ -319,3 +319,17 @@ clients:
     name: voyageai
     api_base: https://api.voyageai.com/v1
     api_key: xxx
+
+# ---- hooks ----
+# hooks:                              # Hook configuration (Claude Code compatible)
+#   max_auto_continue: 5              # Max auto-continue turns (default: 5)
+#   entries:
+#   - event: Stop                     # Fire after LLM responds
+#     command: "/path/to/hook.sh"     # Shell command to execute
+#     timeout: 30                     # Timeout in seconds (default: 30)
+#     protocol: claude-code           # Protocol (default: claude-code)
+#   - event: PreToolUse               # Fire before tool execution
+#     matcher: "execute_command"      # Regex to match tool_name
+#     command: "echo 'blocked' >&2; exit 2"  # Exit 2 = block
+#   - event: SessionStart             # Fire at session start
+#     command: "echo 'Session started'"

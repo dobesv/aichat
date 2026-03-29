@@ -1,0 +1,229 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HookPayload {
+    pub session_id: String,
+    pub cwd: PathBuf,
+    #[serde(default)]
+    pub auto_continue_count: u32,
+    #[serde(flatten)]
+    pub hook_event: HookEvent,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "hook_event_name", rename_all = "PascalCase")]
+pub enum HookEvent {
+    SessionStart {
+        source: String,
+        model: String,
+    },
+    SessionEnd {
+        reason: String,
+    },
+    UserPromptSubmit {
+        prompt: String,
+    },
+    Stop {
+        stop_hook_active: bool,
+        last_assistant_message: Option<String>,
+    },
+    StopFailure {
+        error: String,
+        error_type: String,
+    },
+    PreToolUse {
+        tool_name: String,
+        tool_input: Value,
+        tool_use_id: String,
+    },
+    PostToolUse {
+        tool_name: String,
+        tool_input: Value,
+        tool_response: Value,
+        tool_use_id: String,
+    },
+    PostToolUseFailure {
+        tool_name: String,
+        tool_input: Value,
+        tool_use_id: String,
+        error: String,
+    },
+    InstructionsLoaded {},
+    CwdChanged {},
+}
+
+impl HookEvent {
+    pub fn event_name(&self) -> &'static str {
+        match self {
+            Self::SessionStart { .. } => "SessionStart",
+            Self::SessionEnd { .. } => "SessionEnd",
+            Self::UserPromptSubmit { .. } => "UserPromptSubmit",
+            Self::Stop { .. } => "Stop",
+            Self::StopFailure { .. } => "StopFailure",
+            Self::PreToolUse { .. } => "PreToolUse",
+            Self::PostToolUse { .. } => "PostToolUse",
+            Self::PostToolUseFailure { .. } => "PostToolUseFailure",
+            Self::InstructionsLoaded { .. } => "InstructionsLoaded",
+            Self::CwdChanged { .. } => "CwdChanged",
+        }
+    }
+
+    pub fn matcher_text(&self) -> Option<&str> {
+        match self {
+            Self::PreToolUse { tool_name, .. }
+            | Self::PostToolUse { tool_name, .. }
+            | Self::PostToolUseFailure { tool_name, .. } => Some(tool_name),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookResultControl {
+    Continue,
+    Block { reason: String },
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HookResult {
+    #[serde(default)]
+    pub additional_context: Option<String>,
+    #[serde(default)]
+    pub auto_continue: Option<bool>,
+    #[serde(default)]
+    pub updated_input: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HookOutcome {
+    pub control: HookResultControl,
+    pub result: HookResult,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HookEvent, HookPayload, HookResult};
+    use serde_json::{json, Value};
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_hook_payload_serialization() {
+        let payload = HookPayload {
+            session_id: "session-123".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            auto_continue_count: 2,
+            hook_event: HookEvent::PreToolUse {
+                tool_name: "shell".to_string(),
+                tool_input: json!({"command": "echo hi"}),
+                tool_use_id: "call-1".to_string(),
+            },
+        };
+
+        let value = serde_json::to_value(payload).expect("serialize hook payload");
+        assert_eq!(
+            value["hook_event_name"],
+            Value::String("PreToolUse".to_string())
+        );
+        assert_eq!(value["tool_name"], Value::String("shell".to_string()));
+        assert_eq!(value["tool_input"], json!({"command": "echo hi"}));
+        assert_eq!(
+            value["session_id"],
+            Value::String("session-123".to_string())
+        );
+        assert_eq!(value["cwd"], Value::String("/tmp/project".to_string()));
+        assert_eq!(value["auto_continue_count"], Value::from(2));
+    }
+
+    #[test]
+    fn test_hook_result_deserialization() {
+        let result: HookResult =
+            serde_json::from_str(r#"{"auto_continue":true,"additional_context":"keep going"}"#)
+                .expect("deserialize hook result");
+
+        assert_eq!(result.auto_continue, Some(true));
+        assert_eq!(result.additional_context.as_deref(), Some("keep going"));
+        assert!(result.updated_input.is_none());
+    }
+
+    #[test]
+    fn test_hook_result_empty_json() {
+        let result: HookResult = serde_json::from_str("{}").expect("deserialize empty hook result");
+
+        assert!(result.additional_context.is_none());
+        assert!(result.auto_continue.is_none());
+        assert!(result.updated_input.is_none());
+    }
+
+    #[test]
+    fn test_event_name() {
+        let events = vec![
+            (
+                HookEvent::SessionStart {
+                    source: "cli".to_string(),
+                    model: "claude".to_string(),
+                },
+                "SessionStart",
+            ),
+            (
+                HookEvent::SessionEnd {
+                    reason: "complete".to_string(),
+                },
+                "SessionEnd",
+            ),
+            (
+                HookEvent::UserPromptSubmit {
+                    prompt: "hello".to_string(),
+                },
+                "UserPromptSubmit",
+            ),
+            (
+                HookEvent::Stop {
+                    stop_hook_active: true,
+                    last_assistant_message: Some("done".to_string()),
+                },
+                "Stop",
+            ),
+            (
+                HookEvent::StopFailure {
+                    error: "boom".to_string(),
+                    error_type: "runtime".to_string(),
+                },
+                "StopFailure",
+            ),
+            (
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({}),
+                    tool_use_id: "call-1".to_string(),
+                },
+                "PreToolUse",
+            ),
+            (
+                HookEvent::PostToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({}),
+                    tool_response: json!({"ok": true}),
+                    tool_use_id: "call-2".to_string(),
+                },
+                "PostToolUse",
+            ),
+            (
+                HookEvent::PostToolUseFailure {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({}),
+                    tool_use_id: "call-3".to_string(),
+                    error: "failed".to_string(),
+                },
+                "PostToolUseFailure",
+            ),
+            (HookEvent::InstructionsLoaded {}, "InstructionsLoaded"),
+            (HookEvent::CwdChanged {}, "CwdChanged"),
+        ];
+
+        for (event, expected_name) in events {
+            assert_eq!(event.event_name(), expected_name);
+        }
+    }
+}

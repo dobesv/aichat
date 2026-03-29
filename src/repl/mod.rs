@@ -11,12 +11,13 @@ use crate::config::{
     macro_execute, AgentVariables, AssertState, Config, GlobalConfig, Input, LastMessage,
     StateFlags,
 };
+use crate::hooks::{dispatch_hooks, dispatch_hooks_with_count, HookEvent, HookResultControl};
 use crate::render::render_error;
 use crate::utils::{
     abortable_run_with_spinner, create_abort_signal, dimmed_text, set_text, temp_file, AbortSignal,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use crossterm::cursor::SetCursorStyle;
 use fancy_regex::Regex;
 use reedline::CursorConfig;
@@ -704,8 +705,38 @@ pub async fn run_repl_command(
             _ => unknown_command()?,
         },
         None => {
-            let input = Input::from_str(config, line, None);
-            ask(config, abort_signal.clone(), input, true).await?;
+            let (hooks, session_id) = {
+                let config = config.read();
+                (
+                    config.resolved_hooks(),
+                    config
+                        .session
+                        .as_ref()
+                        .map(|session| session.name())
+                        .unwrap_or("default")
+                        .to_string(),
+                )
+            };
+            let cwd = env::current_dir().unwrap_or_default();
+            let event = HookEvent::UserPromptSubmit {
+                prompt: line.to_string(),
+            };
+            let outcome = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+            match outcome.control {
+                HookResultControl::Block { reason } => {
+                    render_error(anyhow!(reason));
+                }
+                HookResultControl::Continue => {
+                    let input_text = match outcome.result.additional_context {
+                        Some(additional_context) if !additional_context.is_empty() => {
+                            format!("{line}\n\n{additional_context}")
+                        }
+                        _ => line.to_string(),
+                    };
+                    let input = Input::from_str(config, &input_text, None);
+                    ask(config, abort_signal.clone(), input, true).await?;
+                }
+            }
         }
     }
 
@@ -720,8 +751,19 @@ pub async fn run_repl_command(
 async fn ask(
     config: &GlobalConfig,
     abort_signal: AbortSignal,
+    input: Input,
+    with_embeddings: bool,
+) -> Result<()> {
+    ask_inner(config, abort_signal, input, with_embeddings, 0).await
+}
+
+#[async_recursion::async_recursion]
+async fn ask_inner(
+    config: &GlobalConfig,
+    abort_signal: AbortSignal,
     mut input: Input,
     with_embeddings: bool,
+    auto_continue_count: u32,
 ) -> Result<()> {
     if input.is_empty() {
         return Ok(());
@@ -735,23 +777,122 @@ async fn ask(
 
     let client = input.create_client()?;
     config.write().before_chat_completion(&input)?;
+    let (hooks, session_id, cwd) = {
+        let config = config.read();
+        (
+            config.resolved_hooks(),
+            config
+                .session
+                .as_ref()
+                .map(|session| session.name())
+                .unwrap_or("default")
+                .to_string(),
+            env::current_dir().unwrap_or_default(),
+        )
+    };
     let (output, tool_results) = if input.stream() {
-        call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await?
+        match call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                let event = HookEvent::StopFailure {
+                    error: err.to_string(),
+                    error_type: "api_error".to_string(),
+                };
+                let _ = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+                return Err(err);
+            }
+        }
     } else {
-        call_chat_completions(&input, true, false, client.as_ref(), abort_signal.clone()).await?
+        match call_chat_completions(&input, true, false, client.as_ref(), abort_signal.clone()).await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                let event = HookEvent::StopFailure {
+                    error: err.to_string(),
+                    error_type: "api_error".to_string(),
+                };
+                let _ = dispatch_hooks(&event, &hooks.entries, &session_id, &cwd).await;
+                return Err(err);
+            }
+        }
     };
     config
         .write()
         .after_chat_completion(&input, &output, &tool_results)?;
+    let stop_outcome = if tool_results.is_empty() {
+        let event = HookEvent::Stop {
+            stop_hook_active: true,
+            last_assistant_message: Some(output.clone()),
+        };
+        let stop_outcome = dispatch_hooks_with_count(
+            &event,
+            &hooks.entries,
+            &session_id,
+            &cwd,
+            auto_continue_count,
+        )
+        .await;
+        if let Some(additional_context) = stop_outcome
+            .result
+            .additional_context
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            debug!(
+                "Captured Stop hook additional context for later auto-continue in REPL: {additional_context}"
+            );
+        }
+        Some(stop_outcome)
+    } else {
+        None
+    };
     if !tool_results.is_empty() {
-        ask(
+        ask_inner(
             config,
             abort_signal,
             input.merge_tool_results(output, tool_results),
             false,
+            auto_continue_count,
         )
         .await
     } else {
+        if let Some(stop_outcome) = stop_outcome {
+            let (hooks, _, _) = {
+                let config = config.read();
+                let hooks = config.resolved_hooks();
+                let session_id = config
+                    .session
+                    .as_ref()
+                    .map(|session| session.name())
+                    .unwrap_or("default")
+                    .to_string();
+                (hooks, session_id, env::current_dir().unwrap_or_default())
+            };
+            let max_auto_continue = hooks.max_auto_continue.unwrap_or(5);
+            if stop_outcome.result.auto_continue.unwrap_or(false)
+                && auto_continue_count < max_auto_continue
+            {
+                if abort_signal.aborted() {
+                    return Ok(());
+                }
+
+                let context = stop_outcome
+                    .result
+                    .additional_context
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "Continue working on pending tasks.".to_string());
+                let new_input = Input::from_str(config, &context, None);
+                return ask_inner(
+                    config,
+                    abort_signal,
+                    new_input,
+                    true,
+                    auto_continue_count + 1,
+                )
+                .await;
+            }
+        }
         Config::maybe_autoname_session(config.clone());
         Config::maybe_compress_session(config.clone());
         Ok(())

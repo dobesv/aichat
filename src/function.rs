@@ -1,5 +1,6 @@
 use crate::{
     config::{Agent, Config, GlobalConfig},
+    hooks::{dispatch::dispatch_hooks, HookEvent, HookResultControl},
     utils::*,
 };
 
@@ -12,6 +13,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use tokio::runtime::Handle;
 
 #[cfg(windows)]
 const PATH_SEP: &str = ";";
@@ -27,15 +29,79 @@ pub fn eval_tool_calls(config: &GlobalConfig, mut calls: Vec<ToolCall>) -> Resul
     if calls.is_empty() {
         bail!("The request was aborted because an infinite loop of function calls was detected.")
     }
+
+    let hooks = config.read().resolved_hooks();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let session_id = "cmd".to_string();
+
     let mut is_all_null = true;
     for call in calls {
-        let mut result = call.eval(config)?;
-        if result.is_null() {
-            result = json!("DONE");
-        } else {
+        let tool_input = call.arguments.clone();
+        let tool_use_id = call.id.clone().unwrap_or_default();
+
+        let pre_event = HookEvent::PreToolUse {
+            tool_name: call.name.clone(),
+            tool_input: tool_input.clone(),
+            tool_use_id: tool_use_id.clone(),
+        };
+        let pre_outcome = tokio::task::block_in_place(|| {
+            Handle::current().block_on(dispatch_hooks(
+                &pre_event,
+                &hooks.entries,
+                &session_id,
+                &cwd,
+            ))
+        });
+        if let HookResultControl::Block { reason } = pre_outcome.control {
+            let blocked_result = json!({"error": reason, "blocked_by_hook": true});
+            output.push(ToolResult::new(call, blocked_result));
             is_all_null = false;
+            continue;
         }
-        output.push(ToolResult::new(call, result));
+
+        match call.eval(config) {
+            Ok(mut result) => {
+                let post_event = HookEvent::PostToolUse {
+                    tool_name: call.name.clone(),
+                    tool_input: tool_input.clone(),
+                    tool_response: result.clone(),
+                    tool_use_id: tool_use_id.clone(),
+                };
+                let _ = tokio::task::block_in_place(|| {
+                    Handle::current().block_on(dispatch_hooks(
+                        &post_event,
+                        &hooks.entries,
+                        &session_id,
+                        &cwd,
+                    ))
+                });
+
+                if result.is_null() {
+                    result = json!("DONE");
+                } else {
+                    is_all_null = false;
+                }
+                output.push(ToolResult::new(call, result));
+            }
+            Err(err) => {
+                let fail_event = HookEvent::PostToolUseFailure {
+                    tool_name: call.name.clone(),
+                    tool_input: tool_input.clone(),
+                    tool_use_id: tool_use_id.clone(),
+                    error: err.to_string(),
+                };
+                let _ = tokio::task::block_in_place(|| {
+                    Handle::current().block_on(dispatch_hooks(
+                        &fail_event,
+                        &hooks.entries,
+                        &session_id,
+                        &cwd,
+                    ))
+                });
+
+                return Err(err);
+            }
+        }
     }
     if is_all_null {
         output = vec![];
