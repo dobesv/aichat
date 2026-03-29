@@ -12,8 +12,8 @@ use crate::config::{
     StateFlags,
 };
 use crate::hooks::{
-    dispatch_hooks_with_count_and_manager, dispatch_hooks_with_manager, AsyncHookManager,
-    HookEvent, HookResultControl,
+    dispatch_hooks_with_count_and_manager, dispatch_hooks_with_managers,
+    AsyncHookManager, PersistentHookManager, HookEvent, HookResultControl,
 };
 use crate::render::render_error;
 use crate::utils::{
@@ -200,11 +200,16 @@ pub struct Repl {
     prompt: ReplPrompt,
     abort_signal: AbortSignal,
     async_manager: AsyncHookManager,
+    persistent_manager: std::sync::Arc<tokio::sync::Mutex<PersistentHookManager>>,
     pending_async_context: Option<String>,
 }
 
 impl Repl {
-    pub fn init(config: &GlobalConfig, async_manager: AsyncHookManager) -> Result<Self> {
+    pub fn init(
+        config: &GlobalConfig,
+        async_manager: AsyncHookManager,
+        persistent_manager: std::sync::Arc<tokio::sync::Mutex<PersistentHookManager>>,
+    ) -> Result<Self> {
         let editor = Self::create_editor(config)?;
 
         let prompt = ReplPrompt::new(config);
@@ -216,6 +221,7 @@ impl Repl {
             prompt,
             abort_signal,
             async_manager,
+            persistent_manager,
             pending_async_context: None,
         })
     }
@@ -253,6 +259,7 @@ Type ".help" for additional help.
                         self.abort_signal.clone(),
                         &line,
                         &mut self.async_manager,
+                        &self.persistent_manager,
                         &mut self.pending_async_context,
                     )
                     .await
@@ -287,10 +294,10 @@ Type ".help" for additional help.
         let (should_resume, max_resume) = {
             let config = self.config.read();
             let hooks = config.resolved_hooks();
-            (drain_async_results(
-                &mut self.async_manager,
-                &mut self.pending_async_context,
-            ), hooks.max_resume.unwrap_or(5))
+            (
+                drain_async_results(&mut self.async_manager, &mut self.pending_async_context),
+                hooks.max_resume.unwrap_or(5),
+            )
         };
         if !should_resume {
             return Ok(false);
@@ -312,6 +319,7 @@ Type ".help" for additional help.
             input,
             true,
             &mut self.async_manager,
+            &self.persistent_manager,
             &mut self.pending_async_context,
             max_resume,
         )
@@ -424,7 +432,10 @@ fn drain_async_results(
 }
 
 fn inject_pending_async_context(input: &mut Input, pending_async_context: &mut Option<String>) {
-    let Some(context) = pending_async_context.take().filter(|value| !value.is_empty()) else {
+    let Some(context) = pending_async_context
+        .take()
+        .filter(|value| !value.is_empty())
+    else {
         return;
     };
 
@@ -477,6 +488,7 @@ pub async fn run_repl_command(
     abort_signal: AbortSignal,
     mut line: &str,
     async_manager: &mut AsyncHookManager,
+    persistent_manager: &std::sync::Arc<tokio::sync::Mutex<PersistentHookManager>>,
     pending_async_context: &mut Option<String>,
 ) -> Result<bool> {
     let max_resume = config.read().resolved_hooks().max_resume.unwrap_or(5);
@@ -530,16 +542,17 @@ pub async fn run_repl_command(
                     Some((name, text)) => {
                         let role = config.read().retrieve_role(name.trim())?;
                         let input = Input::from_str(config, text, Some(role));
-                        ask(
-                            config,
-                            abort_signal.clone(),
-                            input,
-                            false,
-                            async_manager,
-                            pending_async_context,
-                            max_resume,
-                        )
-                        .await?;
+                         ask(
+                             config,
+                             abort_signal.clone(),
+                             input,
+                             false,
+                             async_manager,
+                             persistent_manager,
+                             pending_async_context,
+                             max_resume,
+                         )
+                         .await?;
                     }
                     None => {
                         let name = args;
@@ -604,17 +617,18 @@ pub async fn run_repl_command(
                     match text {
                         Some(text) => {
                             println!("{}", dimmed_text(&format!(">> {text}")));
-                            let input = Input::from_str(config, &text, None);
-                            ask(
-                                config,
-                                abort_signal.clone(),
-                                input,
-                                true,
-                                async_manager,
-                                pending_async_context,
-                                max_resume,
-                            )
-                            .await?;
+                             let input = Input::from_str(config, &text, None);
+                             ask(
+                                 config,
+                                 abort_signal.clone(),
+                                 input,
+                                 true,
+                                 async_manager,
+                                 persistent_manager,
+                                 pending_async_context,
+                                 max_resume,
+                             )
+                             .await?;
                         }
                         None => {
                             bail!("Invalid starter value");
@@ -728,6 +742,7 @@ pub async fn run_repl_command(
                         input,
                         true,
                         async_manager,
+                        persistent_manager,
                         pending_async_context,
                         max_resume,
                     )
@@ -765,6 +780,7 @@ pub async fn run_repl_command(
                     input,
                     true,
                     async_manager,
+                    persistent_manager,
                     pending_async_context,
                     max_resume,
                 )
@@ -788,6 +804,7 @@ pub async fn run_repl_command(
                     input,
                     true,
                     async_manager,
+                    persistent_manager,
                     pending_async_context,
                     max_resume,
                 )
@@ -869,9 +886,15 @@ pub async fn run_repl_command(
             let event = HookEvent::UserPromptSubmit {
                 prompt: line.to_string(),
             };
-            let outcome =
-                dispatch_hooks_with_manager(&event, &hooks.entries, &session_id, &cwd, Some(async_manager))
-                    .await;
+            let outcome = dispatch_hooks_with_managers(
+                &event,
+                &hooks.entries,
+                &session_id,
+                &cwd,
+                Some(async_manager),
+                Some(persistent_manager),
+            )
+            .await;
             match outcome.control {
                 HookResultControl::Block { reason } => {
                     render_error(anyhow!(reason));
@@ -884,16 +907,17 @@ pub async fn run_repl_command(
                         _ => line.to_string(),
                     };
                     let input = Input::from_str(config, &input_text, None);
-                    ask(
-                        config,
-                        abort_signal.clone(),
-                        input,
-                        true,
-                        async_manager,
-                        pending_async_context,
-                        hooks.max_resume.unwrap_or(5),
-                    )
-                    .await?;
+                     ask(
+                         config,
+                         abort_signal.clone(),
+                         input,
+                         true,
+                         async_manager,
+                         persistent_manager,
+                         pending_async_context,
+                         hooks.max_resume.unwrap_or(5),
+                     )
+                     .await?;
                 }
             }
         }
@@ -913,6 +937,7 @@ async fn ask(
     input: Input,
     with_embeddings: bool,
     async_manager: &mut AsyncHookManager,
+    persistent_manager: &std::sync::Arc<tokio::sync::Mutex<PersistentHookManager>>,
     pending_async_context: &mut Option<String>,
     max_resume: u32,
 ) -> Result<()> {
@@ -922,6 +947,7 @@ async fn ask(
         input,
         with_embeddings,
         async_manager,
+        persistent_manager,
         pending_async_context,
         0,
         max_resume,
@@ -936,6 +962,7 @@ async fn ask_inner(
     mut input: Input,
     with_embeddings: bool,
     async_manager: &mut AsyncHookManager,
+    persistent_manager: &std::sync::Arc<tokio::sync::Mutex<PersistentHookManager>>,
     pending_async_context: &mut Option<String>,
     resume_count: u32,
     max_resume: u32,
@@ -969,27 +996,28 @@ async fn ask_inner(
         )
     };
     let (output, tool_results) = if input.stream() {
-        match call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await
-        {
+        match call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await {
             Ok(result) => result,
             Err(err) => {
                 let event = HookEvent::StopFailure {
                     error: err.to_string(),
                     error_type: "api_error".to_string(),
                 };
-                let _ = dispatch_hooks_with_manager(
+                let _ = dispatch_hooks_with_managers(
                     &event,
                     &hooks.entries,
                     &session_id,
                     &cwd,
                     Some(async_manager),
+                    Some(persistent_manager),
                 )
                 .await;
                 return Err(err);
             }
         }
     } else {
-        match call_chat_completions(&input, true, false, client.as_ref(), abort_signal.clone()).await
+        match call_chat_completions(&input, true, false, client.as_ref(), abort_signal.clone())
+            .await
         {
             Ok(result) => result,
             Err(err) => {
@@ -997,12 +1025,13 @@ async fn ask_inner(
                     error: err.to_string(),
                     error_type: "api_error".to_string(),
                 };
-                let _ = dispatch_hooks_with_manager(
+                let _ = dispatch_hooks_with_managers(
                     &event,
                     &hooks.entries,
                     &session_id,
                     &cwd,
                     Some(async_manager),
+                    Some(persistent_manager),
                 )
                 .await;
                 return Err(err);
@@ -1024,6 +1053,7 @@ async fn ask_inner(
             &cwd,
             resume_count,
             Some(async_manager),
+            Some(persistent_manager),
         )
         .await;
         if let Some(additional_context) = stop_outcome
@@ -1047,6 +1077,7 @@ async fn ask_inner(
             input.merge_tool_results(output, tool_results),
             false,
             async_manager,
+            persistent_manager,
             pending_async_context,
             resume_count,
             max_resume,
@@ -1054,9 +1085,7 @@ async fn ask_inner(
         .await
     } else {
         if let Some(stop_outcome) = stop_outcome {
-            if stop_outcome.result.resume.unwrap_or(false)
-                && resume_count < max_resume
-            {
+            if stop_outcome.result.resume.unwrap_or(false) && resume_count < max_resume {
                 if abort_signal.aborted() {
                     return Ok(());
                 }
@@ -1073,6 +1102,7 @@ async fn ask_inner(
                     new_input,
                     true,
                     async_manager,
+                    persistent_manager,
                     pending_async_context,
                     resume_count + 1,
                     max_resume,
@@ -1097,6 +1127,7 @@ async fn ask_inner(
                 new_input,
                 true,
                 async_manager,
+                persistent_manager,
                 pending_async_context,
                 resume_count + 1,
                 max_resume,

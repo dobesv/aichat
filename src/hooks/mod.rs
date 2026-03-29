@@ -30,6 +30,7 @@ pub mod config;
 pub mod dispatch;
 pub mod executor;
 pub mod matcher;
+pub mod persistent;
 pub mod types;
 
 pub use async_manager::AsyncHookManager;
@@ -37,12 +38,12 @@ pub use async_manager::AsyncHookManager;
 pub use config::{HookConfig, HooksConfig};
 #[allow(unused_imports)]
 pub use dispatch::{
-    dispatch_hooks,
-    dispatch_hooks_with_count,
-    dispatch_hooks_with_manager,
-    dispatch_hooks_with_count_and_manager,
+    dispatch_hooks, dispatch_hooks_with_count, dispatch_hooks_with_count_and_manager,
+    dispatch_hooks_with_manager, dispatch_hooks_with_managers,
 };
 #[allow(unused_imports)]
 pub use executor::execute_command_hook;
 pub use matcher::CompiledMatcher;
+#[allow(unused_imports)]
+pub use persistent::PersistentHookManager;
 pub use types::*;

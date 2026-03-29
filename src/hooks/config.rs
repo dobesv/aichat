@@ -39,7 +39,10 @@ pub struct HookConfig {
 impl HookConfig {
     /// Check if the hook type is supported
     pub fn is_supported_type(&self) -> bool {
-        self.hook_type == "claude-command"
+        matches!(
+            self.hook_type.as_str(),
+            "claude-command" | "claude-command-persistent"
+        )
     }
 }
 
@@ -251,6 +254,17 @@ entries:
             hook_type: "claude-command".to_string(),
         };
         assert!(hook2.is_supported_type());
+
+        let hook_persistent = HookConfig {
+            event: "Stop".to_string(),
+            matcher: None,
+            command: "test.sh".to_string(),
+            timeout: Some(30),
+            status_message: None,
+            async_hook: None,
+            hook_type: "claude-command-persistent".to_string(),
+        };
+        assert!(hook_persistent.is_supported_type());
 
         // Unknown type should be invalid
         let hook3 = HookConfig {

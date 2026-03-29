@@ -2507,6 +2507,7 @@ pub async fn macro_execute(
     let config = Arc::new(RwLock::new(config));
     config.write().macro_flag = true;
     let mut async_manager = AsyncHookManager::new();
+    let persistent_manager = std::sync::Arc::new(tokio::sync::Mutex::new(crate::hooks::PersistentHookManager::new()));
     let mut pending_async_context = None;
     for step in &macro_value.steps {
         let command = Macro::interpolate_command(step, &variables);
@@ -2516,10 +2517,12 @@ pub async fn macro_execute(
             abort_signal.clone(),
             &command,
             &mut async_manager,
+            &persistent_manager,
             &mut pending_async_context,
         )
         .await?;
     }
+    persistent_manager.lock().await.shutdown();
     Ok(())
 }
 

@@ -10,9 +10,12 @@ pub async fn execute_command_hook(
     timeout_secs: Option<u64>,
 ) -> HookOutcome {
     let event_name = payload.hook_event.event_name();
-    debug!("Dispatching hook for event '{}': command='{}'", event_name, command);
+    debug!(
+        "Dispatching hook for event '{}': command='{}'",
+        event_name, command
+    );
     let started_at = std::time::Instant::now();
-    
+
     let shell = default_shell();
     let shell_arg = default_shell_arg();
 
@@ -56,7 +59,10 @@ pub async fn execute_command_hook(
 
     let elapsed = started_at.elapsed().as_millis();
     let exit_code = output.status.code().unwrap_or(-1);
-    debug!("Hook for '{}' completed: exit_code={}, duration={}ms", event_name, exit_code, elapsed);
+    debug!(
+        "Hook for '{}' completed: exit_code={}, duration={}ms",
+        event_name, exit_code, elapsed
+    );
 
     match output.status.code() {
         Some(0) => parse_success_output(&output.stdout),
@@ -176,22 +182,22 @@ fn collect_output(child: &mut Child, status: std::process::ExitStatus) -> std::i
 }
 
 #[cfg(unix)]
-fn default_shell() -> String {
+pub(crate) fn default_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string())
 }
 
 #[cfg(windows)]
-fn default_shell() -> String {
+pub(crate) fn default_shell() -> String {
     "cmd".to_string()
 }
 
 #[cfg(unix)]
-fn default_shell_arg() -> &'static str {
+pub(crate) fn default_shell_arg() -> &'static str {
     "-c"
 }
 
 #[cfg(windows)]
-fn default_shell_arg() -> &'static str {
+pub(crate) fn default_shell_arg() -> &'static str {
     "/C"
 }
 
