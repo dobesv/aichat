@@ -324,10 +324,10 @@ clients:
 #     type: claude-command            # Hook type (required)
 #     command: "/path/to/hook.sh"     # Shell command to execute
 #     timeout: 30                     # Timeout in seconds (default: 30)
-#   - event: PreToolUse               # Fire before tool execution
+#   - event: PreToolUse               # Block access to sensitive files
 #     type: claude-command
-#     matcher: "execute_command"      # Regex to match tool_name
-#     command: "echo 'blocked' >&2; exit 2"  # Exit 2 = block
+#     matcher: "fs_cat|fs_write|fs_patch|fs_rm|execute_command"
+#     command: "grep -q /etc/passwd && echo 'Blocked: sensitive file' >&2 && exit 2; true"
 #   - event: PostToolUse              # Fire after tool execution
 #     type: claude-command
 #     matcher: "Write|Edit"          # Match file-editing tools
